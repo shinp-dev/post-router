@@ -87,6 +87,16 @@ db migrateはworker stop/drain後にmaintenance lockを取得し、online backup
 
 新binary起動時に古いschemaなら送信を開始せずmigrationを案内する。新しすぎるschemaなら読書を拒否する。未読checkpointは新規publishに変換せずNeedsAttention。down migrationはMVPなし。復旧はbackup restoreだが必ずquarantineとなる。
 
+### Maintenanceの全書込経路への適用
+
+maintenance lockはworker専用ではなく、installationごとのprocess間共有/排他gateとする。通常の書込操作は共有利用権、backup / migrate / restoreは排他利用権を必須とする。CLI enqueue / cancel / attach / account・token更新、workerのclaim / receipt、spoolの作成・削除、cleanup等も例外にしない。共有利用権は操作対象のDB・素材への変更開始前に取得し、filesystemとDBのcommit境界を完了するまで保持する。workerのremote操作はDispatchPrepared→HTTP→receipt commitを1つの共有利用区間とし、途中で解放して保守操作に割り込ませない。依存Job待ちや次のdueAtまでの待機では解放する。
+
+保守処理はまずworkerへdrainを要求し、停止・OS worker lock解放を確認してからmaintenanceの排他利用権を取得する。workerのreceipt commitに必要な共有利用権を、排他保持中に待たせてdrainする順序は禁止する。排他取得待ち中は新規共有利用を止め、進行中の通常書込だけを完了させる。待ち切れなければ保守操作を失敗終了し、lockを破って続行しない。新workerも共有利用権を得るまではclaim・送信を開始しない。
+
+排他中の別CLIの書込はBusy / Maintenanceとして終了コード7で拒否し、DB・spoolへ変更を残さない。DBを開く通常CLIは読取も共有利用権を持ち、restoreで旧DBのhandleが残ることを防ぐ。status等の読取は短い区間ごとに接続を閉じて解放し、CLIの--waitや対話入力待ち全体には保持しない。排他解放後に接続し直す場合はschema versionを再検査する。一般の共有利用権取得はgrant lockやDB transactionより前に行い、共有保持から排他へのupgradeをしない。
+
+backupはDB snapshot、spool manifest/hash、参照素材のコピーが完了するまで排他を保持する。migrate / restoreも対象DBの検査・置換・接続終了まで同じgate下で行う。SQLiteの単一writer制約だけを、複数processとfilesystemを跨ぐ保守排他の代わりにしない。
+
 ## Backup / corruption / restore
 
 稼働中のDB file単体copyは禁止。db backupはworkerをdrainしてmaintenance lockを取得し、固定されたDB snapshotとspool manifest/hash、参照素材を1つのbackup setにする。SQLite online backup APIを使うが、DB取得後にworkerがspoolを変えないことをmaintenance lockで保証する。WALを無視したcopyをbackup成功と呼ばない。quick_checkを起動時、integrity_checkをdb check/restore時に行う。異常時はremote mutationを止め、元DBを上書き修復しない。

@@ -67,6 +67,10 @@ providerがtokenをrotateした直後、DB保存前にcrashすると新tokenを�
 
 refreshはexpiry前の余裕時間とjitterを持ち、再起動後も期限を再確認する。renewable access token型のproviderでは、**公式に確認した更新可能時期だけ**をAdapterが使う。401はgrant状態を再読込し、安全なreadを再試行できるが、公開の成否確認を飛ばす理由にはならない。
 
+### 実行待ちと保守排他との順序
+
+通常の認証更新はmaintenance共有利用権→AuthGrant lock→短いDB transactionの順とし、grant lockやDB transactionを保持したままmaintenance待ちへ入らない。network中はDB write lockを保持しない。workerがgrant lockを取得できない場合は実行枠を解放して再評価し、queued Refreshを待つ公開Jobが枠・account lockを占有しないことを[dispatcher契約](scheduling.md)で保証する。CLIの再認証・account removeも同じmaintenance gateとgrant排他を尊重する。
+
 ## File / process / staging
 
 予約素材はcanonical path解決後に読取handleを開き、通常fileか確認し、streamしながらhashを計算してprivate spoolへコピーする。コピー後の固定fileをprobe・uploadする。入力pathの後日再読込、ワイルドカード展開、shellによる変数展開をしない。Windows device path、pipe、UNC/ネットワークpath、directory、意図しないreparse pointはMVPで拒否する。予約完了前の元file削除は不問、spool削除は明示管理する。

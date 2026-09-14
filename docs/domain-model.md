@@ -18,7 +18,7 @@
 | Publication | id、targetId、scheduleId、state、executionMode、createdAt、firstSubmittedAt、confirmedAt、publishedAt、lastError | 公開workflowの正本。Targetごとに1つ。結果が不明ならPublishedにもFailedにも確定しない。試行回数はAttemptから算出する |
 | RemoteObject | id、publicationId、kind、providerObjectId、parentObjectId、visibility、remoteCreatedAt、remotePublishedAt、observedAt | upload/container/publish handle/final objectのIDを混同しない。1 Publicationに複数可 |
 | Job | id、kind、ownerType、ownerId、priority、dueAt、state、generation、attemptNo、workerRunId | 投稿・照合・stats・refresh・cleanupの永続実行単位。ownerはPublication/AuthGrant/StatsSyncRun/DataDeletionのいずれか1つ。dueAtは次のローカル操作時刻 |
-| Attempt | id、jobId、publicationId、stepKey、dispatchState、startedAt、finishedAt、requestDigest、effectCertainty、safeError | HTTP前のintentとHTTP後のreceiptを区別 |
+| Attempt | id、jobId、stepKey、dispatchState、startedAt、finishedAt、requestDigest、effect、replaySafety、effectCertainty、safeError | HTTP前のintentとHTTP後のreceiptを区別。所有者はJobから辿り、Publicationを必須にしない |
 | ProviderCheckpoint | publicationId、adapterKey、schemaVersion、payloadRef、updatedAt | Adapterのみ解釈。機密URLを含み得るので暗号化 |
 | StatsSyncRun | id、scope、state、requestedAt、finishedAt、safeError | 投稿公開状態とは独立した収集run。partialを表現 |
 | MetricsSnapshot | id、accountId、subjectRef、provider、apiVersion、retrievedAt、period、dimensions、rawId、mappingVersion | 投稿/媒体/accountと時間窓を保持。値0と未取得は別 |
@@ -67,3 +67,7 @@ metrics snapshotは複数ページ・複数queryの一括成功を表すもの�
 ## Job ownership
 
 JobのownerTypeとkindの組合せは閉じた表で管理する。Publish/Prepare/Poll/Reconcile/DeleteはPublication、RefreshはAuthGrant、StatsCollectはStatsSyncRun、PurgeはDataDeletionをownerにする。DBでは対応するnullable FKを1つだけ持たせるCHECK制約で表現し、文字列ownerIdだけに依存しない。新job kindの追加はmigrationとApplication handler登録を必要とし、未知kindを汎用実行しない。
+
+## Attempt ownershipの補足
+
+Attemptは必須のjobIdを通してJobのownerを参照する。Publicationへの独立した必須参照は持たず、Refresh / StatsCollect / Purgeの試行にも同じモデルを使う。表示用publicationIdが必要な場合だけPublication ownerから導出し、それ以外はnullとする。無関係なPublicationを作成・関連付けして制約を満たさない。永続化のattempts.job_idは必須FKとし、試行履歴を保持する間は参照先Jobも保持する。effectとreplaySafetyはdispatch時点の値を保存する。

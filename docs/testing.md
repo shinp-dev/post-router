@@ -95,3 +95,15 @@ Windows taskはログオン済み、lock画面、再起動後ログオン、72�
 CIはWindowsを必須、Domain/SQLite/HTTP契約はLinuxも実行してOS差を早期検知する。SNS tokenを通常CIへ入れない。定期live投稿を仕様監視botとして実装しない。公式changelogをreleaseごとに確認し、影響するadapterだけのcontractを更新する。
 
 出荷判定は重要な不変条件と障害matrix、実際のapp権限/gateの確認で行う。coverage数値だけを合格条件にしない。
+
+## 追加監査の受入条件
+
+| Scenario | 注入・競合 | 合格条件 |
+| --- | --- | --- |
+| Refresh依存待ちの枠解放 | global 2の下で公開Jobがtoken更新待ち。複数accountがgrantを共有し、他のuploadも実行中 | 待機公開Jobはslot/owner/account/grant lockを保持しない。Refreshは同じgrantにつき1つだけ実行され、保存後に安全な元操作だけ再開。deadlock・二重refreshなし |
+| 実行中の認証失敗 | 公開request後のAuthExpiredと曖昧な結果 | 元Attemptを保存してから枠を解放。Refresh成功だけを根拠に公開を再送せず、Unknownは照合へ |
+| Maintenanceと別CLI | worker drain後、別processでenqueue / cancel / token更新 / spool cleanupを競合させる | 先行操作は共有利用権の解放まで保守を待たせる。排他中の書込はexit 7で無変更。backupのDB参照と素材hashが一致する |
+| Maintenanceと再起動・旧接続 | backup / migrate / restore中に新worker起動、読取CLI、旧schemaを使うCLIを競合させる | 排他中claim/送信なし。既存DB handleを閉じてから置換し、再接続時にschema検査。drain待ちとreceipt保存がdeadlockしない |
+| 非投稿Attempt | Refresh / StatsCollect / PurgeとPublication ownerのJobそれぞれにAttemptを保存 | Publicationなしの試行を保存・読出し・復旧できる。job_idの必須FKは有効で、架空のPublicationや不一致の二重参照を作らない |
+
+これらは仕様上の受入条件であり、本設計PRで実行済みのテストではない。Refresh関連はPhase 1C/1D、maintenanceと非投稿ownerの検証は該当機能を追加するPhase 1D/1Eまでに組み込む。

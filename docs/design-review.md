@@ -105,3 +105,15 @@ SQLiteはqueue claim、Attempt作成、receipt/remote ID/checkpoint保存を短�
 ## 推奨する開始判断
 
 **READY FOR PHASE 1。** Core + SQLite + Fake ProviderのPhase 1を開始できる。Phase 2以降は対応するgateが閉じた形式/権限だけを出荷する。要件が「必ず4媒体に無人公開」へ固定された場合は、実装を進める前に用途と公式に適合する提供形態を再検討する。ブラウザ代替や私用制限の回避は採用しない。
+
+## PR全体の軽量監査への追記（2026-09-14）
+
+監査対象head `bd34d066f17f6e8b0f26f454a2e2062d7fb63c6d` の全14文書を横断し、追加のMedium 2件 / Low 1件を確認した。これは上記の修正finding集計とは別の追加監査であり、公式APIの再調査・実装試験ではない。
+
+| Severity | 指摘 | 仕様への反映 | 残る検証 |
+| --- | --- | --- | --- |
+| Medium | 公開JobがRefresh待ちのまま枠/lockを占有すると更新処理を妨げ得る | schedulingに依存待ち・許可解放・実行可能候補の契約、securityにmaintenance/grant/DBの順序を追加 | Phase 1C/1Dの共有grant・枠飽和テスト |
+| Medium | maintenanceが通常CLIの書込やspool変更を排除する契約が不明確 | persistenceで全process共通の共有/排他gate、drain順序、Busy応答、旧DB handleとschema再検査を明記 | backup/migrate/restoreと別CLIの競合テスト |
+| Low | AttemptにPublication必須と読める属性が残り非投稿Jobと不整合 | DomainのAttemptをJob経由の所有者参照に揃え、effect/replaySafety保存を明記 | Refresh/Stats/Purgeの保存・復旧とFK検証 |
+
+3件とも設計上の指摘は反映済み。受入条件はtesting.mdへ追加した。動作保証は実装後の試験に残る。Phase 1開始可の判断とProvider別の出荷gateは変更しない。
