@@ -12,7 +12,16 @@
 
 | Severity | 観点・監査で見つけた問題 | 最終設計への修正・確認 | 残留risk / 判定 |
 | --- | --- | --- | --- |
-| Medium | Xの動画upload制約に8GB/16GBというAPI本文で確認できない値が混在 | 現行X API v2 Media本文で確認できる512MB（amplify_video）と、未確認のtweet_video/account条件を分離。category別値はG-Xで確定 | UI/API制約差はX Phaseで契約テスト必須 |
+| High | PublicationとJobの両方がRetryWaitingを持ち、429時の戻り先が一意でない | retry/backoffはJobだけに集約。PublicationはPreparing等のworkflow段階を維持 | Job/Publicationを跨ぐtransaction testが必要 |
+| High | single workerを全HTTP直列と実装すると長時間uploadが他SNSの予約を塞ぐ | 1 coordinator process内のbounded dispatcher、owner/account直列、期限priorityを定義 | provider側処理時間による公開遅延は残る |
+| High | Windows Task Schedulerの既定実行時間上限で常駐workerが停止し得る | ExecutionTimeLimit=PT0Sを明示し、登録後readbackと72時間相当testを追加 | OS task設定の実機差はacceptance test必須 |
+| High | backup restore後のquarantineを解除するCLI/判定がなく、運用不能 | restore/status/release契約を追加。未解決publishがあればrelease拒否 | 照合不能な対象は自動復旧できない |
+| Medium | Job ownerがpublication/grantだけでstats/purgeをschema上表現できない | 4種nullable FK＋kind別CHECK、WorkerRun/claim情報を追加 | 新kindごとにmigrationが必要 |
+| Medium | idempotency hashのcanonical byte列とmaxLateness有無が未定 | post-intent/v1固定writer、文字列/target順/時刻/maxLateness、golden testを定義 | contract変更時はversion追加が必要 |
+| Medium | Scheduleにprovider固有consentAtが混入 | ConsentRecordをTargetへ移し、Scheduleを時刻意図に限定 | provider UX証拠の詳細は各Phaseで確定 |
+| Medium | Windowsで取得不能なtzdb versionを必須保存し得る | dueAtUtc/offsetを正本とし、zone規則fingerprintはoptional | 過去規則の完全再現は保証しない |
+| Medium | worker stop/uninstall/maintenanceの実行契約が不足 | graceful drain、start/stop、maintenance lock、in-flight回復を定義 | 強制終了時はUnknownが残り得る |
+| Medium | X動画上限を監査途中で旧DM制約の512MBへ誤修正していた | 現行公式本文を再取得し、通常Postは非Premium 20分/8GB、Premium・verified 125分/16GB、512MBはDMと訂正 | account entitlementとcodec等はX Phaseで実行時検査 |
 | High | `Schedule.dueAtUtc` と `Job.dueAt` が同じ「dueAt」で、希望公開時刻とprepare時刻を混同し得る | Schedule=希望公開時刻、Job=次ローカル操作時刻と明記。native準備は前倒し可、local final publishは希望時刻前に送らない | 実公開完了時刻はprovider/networkで遅れ得る |
 | High | Expiredを同じPublicationのretry対象にすると、missed policyを越えて意図しない遅延公開が可能 | `post retry` は安全なFailedかつschedule有効時だけ。Expiredは新しい希望時刻・新keyのPostを要求 | 人間が明示的に新規再投稿する場合の重複riskは残る |
 | Medium | Instagram `media_publish` response喪失後にPUBLISHED/final IDを必ず復旧できる前提が強すぎた | G-IGに曖昧結果のreconciliation/final Media ID復旧を追加。未確認ならUnknown→NeedsAttention、新container/re-publish禁止 | canonical本文確認まで自動照合能力は未保証 |
@@ -43,7 +52,13 @@
 | Confirmed | 各SNS公式API上でMVPが成立するか | gate別に判定。TTを審査さえすれば使えるとは書かない | 全4媒体無条件MVPは不可 |
 | Confirmed | 過剰設計か | 単一binary/DB/worker、broker/service/webhookなし。MVPの自動stats cadenceも削減 | vault/Unknownは必要な複雑性として維持 |
 
-この監査で修正対象となったfindingのseverity件数は **Critical 0 / High 2 / Medium 3 / Low 1**。`Confirmed` 行は既存設計が要求を満たした確認事項で、finding件数に含めない。
+初回監査と実装担当視点の再監査を合わせた修正findingは **Critical 0 / High 6 / Medium 8 / Low 1**。`Confirmed` 行は既存設計が要求を満たした確認事項で、finding件数に含めない。High/Mediumはすべて本設計へ反映済みで、実装後のfailure testを残す。
+
+## 実装担当としての再監査
+
+Phase 1の各classを自分で実装する前提で、状態の所有者、DB制約、worker lifecycle、長時間I/O、backup復元、決定的hashを追跡した。主な結論は、retryをPublicationからJobへ移すこと、single workerを単一coordinator processとして定義すること、job ownerをDB FKで閉じること、Phase 1を1A〜1Eへ分割することだった。
+
+この修正後は実装開始時に大きな設計判断をやり直す必要はない。初期並行数、drain timeout、SQLite busy timeout、spool上限等の運用値はPhase 1で計測して固定する。これらはarchitecture変更ではない。Provider初実装で契約が不自然と判明した場合、汎用field追加で隠さずX Adapterの具体例と一緒に設計差分をreviewする。
 
 ## Failure Matrix
 
@@ -53,11 +68,11 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | validation failure | Failed / enqueue拒否 | なし | No。入力修正後は新しいvalidated attempt | 不要 | 入力/optionを修正 | None |
 | auth failure / scope missing | NeedsAttention / ReauthRequired | なし、または既知handleが途中状態 | publishはNo。auth処理のみ可 | 既知handleがあればrefresh後status確認 | 再認証/権限付与 | Low。ただし401後publish盲再送はHigh |
-| token expiry | RetryWaiting / auth job | 既存remote objectあり得る | refresh自体は条件付きYes。元操作はreplaySafety次第 | refresh後に元step/handle状態を再確認 | refresh token失効時は再認証 | Low〜High、元publishを再送すると上昇 |
-| rate limit | RetryWaiting | 通常は副作用なし。ただしresponse timing次第 | 読み取り/未送信と証明できる操作のみYes | Retry-After/reset後、必要ならstatus | 通常不要。quota/残高不足は対応 | Low。曖昧publishならHigh |
-| provider 5xx before submissionと証明 | RetryWaiting | なし | Yes、replaySafetyの許す操作のみ | 原則不要 | 繰返し時は診断 | Low |
+| token expiry | Publication段階維持 / Refresh Job queued | 既存remote objectあり得る | refresh自体は条件付きYes。元操作はreplaySafety次第 | refresh後に元step/handle状態を再確認 | refresh token失効時は再認証 | Low〜High、元publishを再送すると上昇 |
+| rate limit | Publication段階維持 / Job delayed | 通常は副作用なし。ただしresponse timing次第 | 読み取り/未送信と証明できる操作のみYes | Retry-After/reset後、必要ならstatus | 通常不要。quota/残高不足は対応 | Low。曖昧publishならHigh |
+| provider 5xx before submissionと証明 | Publication段階維持 / Job delayed | なし | Yes、replaySafetyの許す操作のみ | 原則不要 | 繰返し時は診断 | Low |
 | provider 5xx after possible submission | Unknown | 成功/失敗/processingのいずれもあり得る | **No** | operation-bound handle/status/read。なければInconclusive | Inconclusiveなら確認・attach・新規再投稿判断 | High |
-| timeout before sendと証明 | RetryWaiting | なし | Yes | 不要 | 通常不要 | Low |
+| timeout before sendと証明 | Publication段階維持 / Job delayed | なし | Yes | 不要 | 通常不要 | Low |
 | timeout / send有無不明 | Unknown | 未受理または成功済み | **No** | Provider reconcile。類似投稿検索だけでAbsent認定しない | 照合不能なら判断 | High |
 | ambiguous success / response lost | Unknown | Published / Processing / Scheduled | **No** | remote ID/handle/statusを強い証拠で回収 | unresolvedならattachまたは明示的な新規再投稿 | High |
 | crash before request / DispatchPrepared前 | Pending / Ready / Claimed recovery | なし | Yes | DB state確認 | 不要 | Low |
@@ -75,7 +90,7 @@ README、architecture、provider contract、domain model、persistence、schedul
 
 Provider固有endpoint/DTO/status/OAuth response/metrics fieldはProvider client/Adapter側へ閉じ、Application/Domainはcanonical intent、capability、step、receipt、error categoryだけを扱う。versioned wire DTO変更はprovider内部、共通意味が変わる時だけDomain contract変更を許す。
 
-SQLiteはqueue claim、Attempt作成、receipt/remote ID/checkpoint保存を短いtransactionで処理し、外部HTTPをtransaction内へ保持しない。DB→HTTP→DBのfailure windowはUnknown/reconcileで扱う。単一PC向けにdistributed queue、broker、microservice、event sourcing、CQRS、plugin loader、Kubernetesは導入しない。
+SQLiteはqueue claim、Attempt作成、receipt/remote ID/checkpoint保存を短いtransactionで処理し、外部HTTPをtransaction内へ保持しない。retry待機はJobだけが所有し、Publicationは公開workflow段階を保持する。WorkerRunとowner FKによりcrash後のclaim回復を一意にする。DB→HTTP→DBのfailure windowはUnknown/reconcileで扱う。単一PC向けにdistributed queue、broker、microservice、event sourcing、CQRS、plugin loader、Kubernetesは導入しない。
 
 ## 未解消の出荷gate
 

@@ -52,7 +52,9 @@ Capabilitiesはboolean一覧ではなく、利用可否、条件、必要入力�
 
 ## SchedulerとOS
 
-SQLite Jobsが唯一のqueue。OS taskはworkerを起動・再起動するだけで、投稿1件ごとにOS taskを作らない。時刻精度はworker loopで管理する。既定はログオン中のユーザーtask、追加プロファイルで非ログオン時起動を設計する。Windows Serviceは採用しない。キー利用主体と実行主体を一致させる。
+SQLite Jobsが唯一のqueue。OS taskはworkerを起動・再起動するだけで、投稿1件ごとにOS taskを作らない。単一workerはinstallationごとに1 coordinator processという意味で、全HTTPを1本ずつ直列実行する意味ではない。worker内dispatcherはPublication/AuthGrant等のowner単位を直列化しつつ、期限付きpublishを優先して少数の非同期operationを並行実行する。初期上限はglobal 2、provider/accountごとは1とし、bulk/低priority operationは同時1までに制限して残り1 slotを期限付きpublish・必要なrefresh/reconcileへ予約する。設定で無制限に増やさない。長いuploadは可能ならchunkごとにcheckpointしてdispatcherへ制御を戻す。stats/cleanupはpublish準備・公開より低priorityとする。
+
+時刻精度はworker loopで管理する。既定はログオン中のユーザーtask、追加プロファイルで非ログオン時起動を設計する。Windows Serviceは採用しない。キー利用主体と実行主体を一致させる。shutdown時は新規claimを止め、in-flight operationの結果保存を待つ。期限内に終了できない操作は強制的に成功/失敗へ確定せず、保存済みDispatchPreparedから復旧する。
 
 ## Persistence / Auth / Analytics
 

@@ -28,6 +28,7 @@ xUnit、.NET TimeProvider、ASP.NET Core/Kestrelのloopback fake serverを採用
 | rotating refresh crash | response後DB commit前 | 古いtoken無限retryなし、ReauthRequired |
 | duplicate CLI | 同じkeyを同時enqueue | Post/対象jobは1組。同じkey別意図はConflict |
 | duplicate worker | 2process、旧process suspend | 1つだけlock取得。lease時刻でtakeoverしない |
+| recovered claimed job | 旧WorkerRunのclaim直後/Prepared後/receipt後 | claim直後だけ通常requeue。Prepared後はeffect/replay safetyで分岐 |
 | crash before dispatch commit | persist前 | 復旧後に通常実行可能 |
 | crash after Prepared | HTTP前/後を区別不能にする | 非冪等操作の盲目的再送なし |
 | crash after receipt commit | 次job作成後 | 保存handleから再開。最初のcreateを繰返さない |
@@ -47,8 +48,18 @@ xUnit、.NET TimeProvider、ASP.NET Core/Kestrelのloopback fake serverを採用
 | malformed metric / unknown enum | data type・必須field変更 | raw隔離、誤った0や共通指標生成なし |
 | retention deadline offline | 停止後に再起動 | data利用前に期限処理、backup/exportにも削除 |
 | partial batch | X成功・YT失敗等 | 成功対象を再投稿/自動削除しない |
+| long upload vs due publish | provider Aの低速upload中、さらにStats待機中にprovider Bがdue | bulkは1 slotだけを使い、予約slotでBを開始。同一owner stepは並行しない |
+| graceful worker stop | read/upload/publish送信前後 | 新規claim停止、receipt保存、lock解放。強制終了後はPreparedから復旧 |
+| Task Scheduler 72h boundary | execution limit設定と定義readback | PT0Sを確認し、既定時間でworkerを停止させない |
+| job owner integrity | kindと4種owner FKの不正組合せ | DB CHECKとApplicationの両方で拒否 |
+| canonical intent | target順、JSON key順、Unicode、改行、Immediate再実行 | golden bytes/hashが安定。maxLateness差はConflict |
+| restore command | backup復元→status→release | quarantine中remote mutation 0回、未解決publishがあればrelease拒否 |
 
 「exactly-onceテスト合格」とは呼ばない。fake provider側の副作用履歴を観測し、曖昧操作を本ツールが再送していないこと、回復可能なhandleを再利用していることを確認する。API自体の二重処理まで証明するものではない。
+
+## 状態の単一所有テスト
+
+一時障害・429でPublicationのworkflow段階が変わらず、Jobだけが新しいdueAtでQueuedになることを検査する。Preparing、Publishing、Processingの各段階から同じテストを行い、RetryWaitingのような第2のworkflow状態を再導入しない。JobのattemptNoとAttempt履歴の件数差を許容する条件を明示し、表示上の総試行回数はAttemptから算出する。
 
 ## Provider mock / fixtures
 
@@ -75,7 +86,7 @@ shell metacharacters、空白・日本語path、先頭dash、device path、UNC�
 
 ログ/JSON/error/diagnostic bundleへseedしたsecret markerが1つも出ないテストを行う。HTTP handlerのdebug logや例外ToStringを含める。OAuth state不一致、callback再送、port占有、flow timeout、relayの無認証取得を拒否する。
 
-Windows taskはログオン済み、lock画面、再起動後ログオン、本人設定した非ログオンtaskを別caseとして検証する。vaultアクセス不能で平文fallbackしない。異なるSID/SYSTEMでのworker起動をdoctorが説明できること。特権なしで標準profileが動くことを合格条件とする。
+Windows taskはログオン済み、lock画面、再起動後ログオン、72時間相当の設定readback、本人設定した非ログオンtaskを別caseとして検証する。worker install/start/stop/uninstallを通し、uninstall後にprocessが残らずDB/queueは残ることを確認する。vaultアクセス不能で平文fallbackしない。異なるSID/SYSTEMでのworker起動をdoctorが説明できること。特権なしで標準profileが動くことを合格条件とする。
 
 ## Migration / release gates
 

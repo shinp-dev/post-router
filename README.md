@@ -6,7 +6,7 @@
 
 ## 設計上の結論
 
-C# / .NET 10 LTS、System.CommandLine、SQLiteを採用する。1つの実行ファイル `pub` がCLIとworkerを提供し、Windowsタスクスケジューラから同じユーザーでworkerを起動する。SNS別AdapterがAPI・認証・制限・メトリクス解釈を所有する。
+C# / .NET 10 LTS、System.CommandLine、SQLiteを採用する。1つの実行ファイル `pub.exe` が通常CLIと `worker run` を提供し、Windowsタスクスケジューラから同じユーザーでworkerを起動する。単一workerとは、installationごとに実行調整を担うprocessを1つにする意味であり、1つのHTTP処理で全queueを直列に塞ぐ意味ではない。worker内では対象ごとの直列性を保ちながら、期限優先の小さな並行実行を行う。SNS別AdapterがAPI・認証・制限・メトリクス解釈を所有する。
 
 4媒体を設計対象とするが、**4媒体すべてへの私用CLIによる無人公開投稿は、現行の公式API条件ではMVPとして約束できない。** TikTok Direct Postには私用アップロードツールを不適切とする規定がある。審査に出せば必ず解決する問題として扱わない。[TikTok公式ガイドライン](https://developers.tiktok.com/doc/content-sharing-guidelines)
 

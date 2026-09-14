@@ -27,9 +27,10 @@
 | stats show --post ID | 保存済みmetrics。同期は暗黙実行しない |
 | stats export --format jsonl | provider名・定義・期間付きexport |
 | worker run / worker once | 排他を獲得してjob処理。onceは現在dueな有限batch |
-| worker install / status / uninstall | 自ユーザーOS task登録・確認・解除 |
+| worker install / start / stop / status / uninstall | 自ユーザーOS task登録、起動、graceful drain停止、確認、解除。uninstallだけで実行中processを放置しない |
 | doctor [--online] | DB・vault・素材・clock・worker・accountの診断。投稿はしない |
-| db backup / db check / db migrate | workerとの排他下で管理 |
+| db backup / db check / db migrate | maintenance drainと排他下で管理 |
+| db restore FILE / db restore status / db restore suppress ID / db restore release | 復元後は全送信jobをquarantine。照合・attach、または不明対象の送信抑止後に安全なjobだけ解放 |
 | data purge --account ALIAS | ローカルprovider由来データ削除。再収集するには明示再開 |
 
 ## 共通投稿入力
@@ -93,7 +94,7 @@ textはX本文、IG caption、TikTok caption、YouTube descriptionへAdapterがm
 - Expiredは「元の希望公開時刻を過ぎ、許容遅延も超えた」状態なので `post retry` で遅れて公開しない。公開したい場合は新しい希望時刻・新しいidempotency keyのPostとして登録する。
 - enqueue後の入力はimmutable。MVPにin-place予約編集コマンドは設けない。未送信の取消確認後、新しいkeyで登録する。将来の編集は新revisionとし、native予約済みならprovider取消/更新の確認を必要とする。
 - 保存成功後にCLI応答を失っても、同じidempotency keyで復帰する。
-- post既定はqueue登録で終了。worker稼働中なら処理される。`--wait` は状態を待つだけ。worker不在では永続化した上でwarningを返し、実行済みと表示しない。
+- post既定はqueue登録で終了。worker稼働中なら処理される。`--wait` は状態を待つだけで、既定timeout後もqueueを取消さない。worker不在は即座に検出して永続化した上でwarningを返し、無期限に待たない。実行済みとも表示しない。
 
 ## AI向け出力
 

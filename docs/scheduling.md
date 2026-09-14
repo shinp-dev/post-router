@@ -24,7 +24,6 @@ stateDiagram-v2
     [*] --> Pending
     Pending --> Preparing
     Preparing --> Ready
-    Preparing --> RetryWaiting
     Ready --> Publishing
     Ready --> ScheduledRemote
     Publishing --> Processing
@@ -33,7 +32,6 @@ stateDiagram-v2
     Processing --> Published
     Processing --> Failed
     ScheduledRemote --> Published
-    RetryWaiting --> Preparing
     Unknown --> Processing: handle recovered
     Unknown --> Published: evidence found
     Unknown --> NeedsAttention: inconclusive
@@ -45,7 +43,7 @@ stateDiagram-v2
 | --- | --- |
 | localの未送信、Schedule.dueAtUtc到来 | ReadyからPublishing。Attempt intentを先にcommit |
 | native登録成功 | ScheduledRemote。公開確認pollを予約 |
-| 安全な操作に対する一時障害 | RetryWaiting。resumeStateとnextAllowedAtを保存し、元段階へ戻る |
+| 安全な操作に対する一時障害 | Publication段階は維持。JobをQueuedへ戻し、resumeStateと次のdueAtを保存 |
 | 公開し得るrequestが成否不明 | Unknown。publish retryを禁止しreconcile jobのみ |
 | 認証取消、権限不足、能力変更 | NeedsAttention。AccountはReauthRequired等 |
 | 審査中・transcoding | Processing。provider handleで追跡 |
@@ -58,11 +56,21 @@ Processing/UnknownからFailedへ移すにはremote失敗の証拠が必要。�
 
 ## 永続queueと排他
 
-SQLite transactionでPost、Target、Publication、初回Jobを一括登録する。外部HTTPはDB transaction中に行わない。queueのJob状態はQueued / Claimed / Done / Blocked / Cancelledで、Publicationの公開状態とは別。
+SQLite transactionでPost、Target、Publication、初回Jobを一括登録する。外部HTTPはDB transaction中に行わない。queueのJob状態はQueued / Claimed / Done / Blocked / Cancelledで、Publicationの公開状態とは別。一時障害とrate limitはPublicationを別状態へ往復させず、JobのdueAt、attemptNo、last safe errorで表す。
 
-workerはinstallationの固定lock fileをOSの排他ハンドルで保持する。lock fileを削除して奪う方式は禁止。同じユーザーのCLIを含め、投稿系remote mutationはworkerだけが実行する。DBのgeneration条件付きUPDATEでjobをclaimする。lease期限は監視用で、期限切れだけで第2workerを起動・同じjobを奪取しない。process停止・OS lock解放を確認したworkerだけがrecoverする。
+workerはinstallationの固定lock fileをOSの排他ハンドルで保持する。lock fileを削除して奪う方式は禁止。同じユーザーのCLIを含め、投稿系remote mutationはworkerだけが実行する。起動ごとにWorkerRunを作り、DBのgeneration条件付きUPDATEでjobへworkerRunId/claimedAtを設定してclaimする。lease期限は監視用で、期限切れだけで第2workerを起動・同じjobを奪取しない。process停止・OS lock解放を確認した新WorkerRunだけが旧runのClaimed jobをrecoverする。
+
+recover時はJobだけを一律Queuedへ戻さない。対応AttemptがDispatchPreparedならeffect/replaySafetyに従い、readは再実行、公開し得る操作はUnknown/reconcile、receipt保存済みならcheckpointから次stepへ進める。Attemptがなくclaim直後と分かるjobだけを通常queueへ戻す。
 
 スリープから旧workerが復帰する場合にもOS lockが残るため第2workerは開始しない。hung workerの再起動は明示停止後に実施する。killしても既に送信されたHTTPのremote処理は取消されないので、残されたAttemptを照合する。
+
+## Dispatcherと長時間処理
+
+single workerは1processのcoordinatorを意味する。dispatcherはdueAt、priority、作成順で候補を選び、初期値global 2、同一owner 1、同一provider/account mutation 1の上限で実行する。bulk upload・Stats・Cleanupが使えるslotは同時1に制限し、残り1 slotを期限付きPrepare/Publish、依存するAuth Refresh、Reconcileへ予約する。公開時刻が迫るPrepare/Publish、Reconcile、Auth Refresh、通常Prepare、Stats、Cleanupの順に扱う。ただしrefresh待ちの公開jobは同じgrantのRefreshをその公開jobの優先度へ一時昇格する。
+
+同一Publicationのstepは直列で、前stepのreceipt commit前に次を開始しない。長時間uploadはproviderが許すchunk単位でjobをyieldし、ack offsetをcommitする。単一request型のuploadもasync I/Oで他ownerの期限付きjobを処理できる。global slotを増やしてrate limitを回避せず、rate bucketとprovider account上限を先に適用する。
+
+graceful stopはcontrol requestをDBへ記録し、新規claimを停止する。未送信operationはqueueへ残す。送信開始済みoperationは短い一律cancelで切断せず、設定済みHTTP timeoutまたはdrain timeoutまでreceipt保存を待つ。drain timeoutを越えてOSが終了させた場合は、次回起動でDispatchPreparedとして照合する。worker stopの成功はprocess停止・OS lock解放まで確認した時だけ返す。
 
 ## HTTP境界と復旧
 
@@ -112,7 +120,7 @@ token refreshは同一AuthGrantで直列化し、新token保存後に安全性�
 
 ## 時刻・遅延・DST
 
-Scheduleに保存する値は入力local time、IANA zone、選択offset、dueAtUtc、変換時のtimezone data識別情報。ここで `Schedule.dueAtUtc` は希望公開時刻である。Jobの `dueAt` はprepare/poll/reconcileを含む次操作の時刻で、Scheduleの意味を上書きしない。offsetだけの入力も許容する。zoneとoffsetの両指定は整合性を検証する。Windows zone名は明示mappingで扱う。存在しないDST時刻は拒否、二重に存在する時刻はoffset指定を要求する。
+Scheduleに保存する値は入力local time、IANA zone、選択offset、dueAtUtc、可能なら変換に用いたzone規則fingerprint。Windowsが安定したtzdb版番号を提供しない場合、存在しないversion文字列を作らずfingerprintはoptionalとする。ここで `Schedule.dueAtUtc` は希望公開時刻である。Jobの `dueAt` はprepare/poll/reconcileを含む次操作の時刻で、Scheduleの意味を上書きしない。offsetだけの入力も許容する。zoneとoffsetの両指定は整合性を検証する。Windows zone名は明示mappingで扱う。存在しないDST時刻は拒否、二重に存在する時刻はoffset指定を要求する。
 
 MVPでは日付なしの20:00や自然言語を受け付けない。秒の丸めは勝手にしない。providerが秒精度を持たない場合は計画に示す。保存後のtimezone rule更新でSchedule.dueAtUtcを勝手に変えない。
 
@@ -122,7 +130,9 @@ default maxLatenessは15分。local publishのSchedule.dueAtUtcを過ぎても�
 
 ## Windows運用
 
-MVPはWindowsタスクスケジューラで同じユーザーのworker runをログオン時に起動し、異常終了時の再起動とStartWhenAvailableを設定する。多重起動設定は「新しいインスタンスを開始しない」。OS lockも併用する。管理者・SYSTEM・Windows Serviceは既定で不要。
+MVPはWindowsタスクスケジューラで同じユーザーのworker runをログオン時に起動し、異常終了時の再起動を設定する。長期workerが既定72時間で終了しないようExecutionTimeLimit=PT0S、多重起動はIgnoreNew相当を明示設定し、登録後にtask定義を読み返してdoctorで検証する。[ExecutionTimeLimit公式](https://learn.microsoft.com/en-us/windows/win32/taskschd/tasksettings-executiontimelimit) StartWhenAvailableは繰返し/時刻triggerに対する性質を持つため、ログオンtriggerの再起動保証として単独依存しない。OS lockも併用する。管理者・SYSTEM・Windows Serviceは既定で不要。
+
+worker installは絶対binary path、固定data directory、installation IDをtaskへ登録する。相対pathや現在directoryに依存しない。worker startは登録taskを開始、worker stopはDBへdrain要求を出して停止とlock解放を待つ。worker uninstallは先にstopし、task削除後もqueue/DBを消さない。binary更新とmigrationはstop→backup→更新→migrate→startの順に行う。
 
 既定構成はログオン済みユーザーで動作する。再起動後はログオン時にqueueをrecoverしmissed policyを適用する。ログオン前も必要なら、本人がタスクスケジューラでpassword-logon方式を設定し、同一profileのvault復号とnetworkを実機検証する。本CLIはWindowsログオンpasswordを保存しない。S4Uを非対話credential利用可能と仮定しない。[Windows公式](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
 

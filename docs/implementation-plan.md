@@ -10,14 +10,19 @@
 
 ## Phase 1 — Core + SQLite + fake provider
 
-内容:
-- .NET 10 solution、CLI入出力schema、Domain/ports、fake provider。
-- SQLite migration、素材固定、local key、durable step、receipt、Unknown照合。
-- single worker、TimeProvider、Windows user task、vault master keyと暗号化secret。
-- fake metrics raw/projection、retention、backup/restore quarantine。
-- doctor、queue、post status、stats sync/showをfake上で一巡。
+Phase 1を一括実装しない。各sliceはmainへ入れられる縦の動作単位とし、後続sliceが前の不変条件を壊さないことを確認する。
 
-完了条件: enqueue応答喪失・公開応答喪失・二重worker・refresh race・PC再起動・old backupの必須試験を通す。fakeを公開済みとみなす本番profileは存在しない。SNS API keyやdeveloper accountは不要。
+| Slice | 実装範囲 | 完了条件 |
+| --- | --- | --- |
+| 1A Foundation | .NET 10 solution、Domain最小型、CLI JSON envelope、embedded migration runner、TimeProvider | build/test、schema version拒否、canonical intent golden test |
+| 1B Durable publish | manifest、素材固定、Post/Target/Publication/Job/Attempt、Fake Provider、DispatchPrepared→receipt→checkpoint | enqueue応答喪失、同一key競合、公開応答喪失、Unknown、部分成功 |
+| 1C Worker recovery | OS lock、WorkerRun、bounded dispatcher、priority、claim recovery、start/stop、Windows user task | 二重worker、長いupload中のdue publish、graceful/forced stop、再起動、72時間制限定義 |
+| 1D Secrets and auth | MasterKeyStore、AES-GCM vault、Fake AuthGrant/rotation | secret marker非流出、grant refresh race、rotation response喪失 |
+| 1E Metrics and operations | Raw/projection、StatsSyncRun、retention、backup/restore quarantine、doctor/queue/status | metric意味差、期限超過、old backup、restore release拒否 |
+
+1Aでは全provider用の空テーブルや空interfaceを先に量産しない。1BでPublication owner、1DでAuthGrant owner、1EでStats/DataDeletion ownerをmigration追加し、Jobの閉じたowner-kind契約を各sliceで拡張する。最初の実Provider前に抽象化を固定しすぎず、X Phaseで得た差分はprovider境界の範囲で契約へ反映する。
+
+Phase 1全体の完了条件: enqueue応答喪失・公開応答喪失・二重worker・長時間upload競合・refresh race・PC再起動・old backupの必須試験を通す。fakeを公開済みとみなす本番profileは存在しない。SNS API keyやdeveloper accountは不要。
 
 人間が用意するもの:
 - Windows 11等の.NET 10対応PCと通常ユーザーprofile。task/vaultの確認に使えるログオン環境。

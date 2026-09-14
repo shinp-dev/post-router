@@ -13,10 +13,11 @@
 | Content | id、kind、text、title、mediaAssets | TextOnly / ImageSet / Video。意味的入力でありwire DTOではない |
 | MediaAsset | id、sha256、sizeBytes、detectedMime、duration、width、height、storageRef | 予約は固定コピーのみ参照。original pathを後日読み直さない |
 | Target | id、postId、revision、accountId、visibilityIntent、optionsSchema、optionsVersion、optionsPayload | provider固有optionsはadapter所有の検証済み契約。secret不可 |
-| Schedule | id、requestedLocalTime、zoneId、offset、dueAtUtc、maxLateness、consentAt | dueAtUtcは希望公開時刻。曖昧DSTを黙って補正しない。prepare/poll等の実行時刻はJob.dueAtへ置く |
-| Publication | id、targetId、scheduleId、state、executionMode、createdAt、firstSubmittedAt、confirmedAt、publishedAt、lastError、attemptCount | 実行状況の正本。Targetごとに1つ。結果が不明ならPublishedにもFailedにも確定しない |
+| ConsentRecord | id、targetId、kind、policyVersion、recordedAt、evidenceDigest | providerが要求する投稿同意・開示確認。Scheduleへ混ぜずTargetに結び付ける。tokenや画面内容は保存しない |
+| Schedule | id、mode、requestedLocalTime、zoneId、offset、dueAtUtc、maxLateness、zoneRulesFingerprint | dueAtUtcは希望公開時刻。曖昧DSTを黙って補正しない。prepare/poll等の実行時刻はJob.dueAtへ置く。OSに版番号がなければ規則fingerprintは任意 |
+| Publication | id、targetId、scheduleId、state、executionMode、createdAt、firstSubmittedAt、confirmedAt、publishedAt、lastError | 公開workflowの正本。Targetごとに1つ。結果が不明ならPublishedにもFailedにも確定しない。試行回数はAttemptから算出する |
 | RemoteObject | id、publicationId、kind、providerObjectId、parentObjectId、visibility、remoteCreatedAt、remotePublishedAt、observedAt | upload/container/publish handle/final objectのIDを混同しない。1 Publicationに複数可 |
-| Job | id、publicationIdまたはgrantId、kind、dueAt、state、generation、attemptNo | 投稿・照合・stats・refresh・cleanupの永続実行単位。dueAtは次のローカル操作時刻でSchedule.dueAtUtcとは別意味 |
+| Job | id、kind、ownerType、ownerId、priority、dueAt、state、generation、attemptNo、workerRunId | 投稿・照合・stats・refresh・cleanupの永続実行単位。ownerはPublication/AuthGrant/StatsSyncRun/DataDeletionのいずれか1つ。dueAtは次のローカル操作時刻 |
 | Attempt | id、jobId、publicationId、stepKey、dispatchState、startedAt、finishedAt、requestDigest、effectCertainty、safeError | HTTP前のintentとHTTP後のreceiptを区別 |
 | ProviderCheckpoint | publicationId、adapterKey、schemaVersion、payloadRef、updatedAt | Adapterのみ解釈。機密URLを含み得るので暗号化 |
 | StatsSyncRun | id、scope、state、requestedAt、finishedAt、safeError | 投稿公開状態とは独立した収集run。partialを表現 |
@@ -27,9 +28,9 @@ Account status: Ready / ReauthRequired / PolicyBlocked / Disabled / Removed。�
 
 ## Publication状態
 
-Pending、Preparing、Ready、Publishing、Processing、ScheduledRemote、Published、RetryWaiting、Unknown、AwaitingUser、NeedsAttention、Failed、Expired、CancelRequested、Cancelled。
+Pending、Preparing、Ready、Publishing、Processing、ScheduledRemote、Published、Unknown、AwaitingUser、NeedsAttention、Failed、Expired、CancelRequested、Cancelled。
 
-これらは状態名の共通語彙。providerの生enumはここへ持ち込まず、adapterが証拠の強さと一緒にmappingする。Publishedは要求した公開先・visibilityで公開が確認された状態。private upload成功をpublic Publishedと呼ばない。
+これらは公開workflowの共通語彙。providerの生enumはここへ持ち込まず、adapterが証拠の強さと一緒にmappingする。待機・backoff・claimはJobの状態とdueAtで表し、PublicationにRetryWaitingを持たせない。これにより429がPreparing/Publishing/Processingのどこで起きたかを失わない。Publishedは要求した公開先・visibilityで公開が確認された状態。private upload成功をpublic Publishedと呼ばない。
 
 DeletedはPublicationの公開履歴を消す状態ではなく、RemoteObjectの現在availabilityとして記録する。過去にPublishedだった事実と、現在Deleted/Unavailableであることは両立する。
 
@@ -39,7 +40,7 @@ DeletedはPublicationの公開履歴を消す状態ではなく、RemoteObject�
 
 OptionsEnvelopeはschemaId / version / canonical serialized payload / digestを持つ。opaqueな保存単位であって、任意API requestの逃げ道ではない。adapter-owned schemaでunknown keyを拒否し、scope、endpoint、Authorization等を指定できない。
 
-TikTokのprivacy選択・商用開示・同意記録、YouTube madeForKids・formatIntent、IG placement等を表現可能にする。coreはこれらを解釈せずAdapterのrequired inputs/validation resultを扱う。
+TikTokのprivacy選択・商用開示、YouTube madeForKids・formatIntent、IG placement等を表現可能にする。providerが明示同意の証拠を要求する場合はConsentRecordに残し、汎用Scheduleへprovider事情を入れない。coreは内容を解釈せずAdapterのrequired inputs/validation resultを扱う。
 
 ## IDsと時刻
 
@@ -51,7 +52,7 @@ Post全体の状態は子Publicationの集約表示（AllPending / InProgress / 
 
 ## 冪等性と改訂
 
-clientRequestIdはinstallation内でunique。intentHashはUTF-8本文、title、素材hash、解決済みaccount IDs、schedule UTC、options version/内容を決定的にserializeして算出。raw path、CLI引数の並び順、表示aliasをhashの意味にしない。
+clientRequestIdはinstallation内でunique。intentHashはschema名 `post-intent/v1`、本文・titleの正確なUnicode scalar列、順序付き素材hash、account UUIDでsortしたTargetのvisibility/options、Schedule.mode、AtTimeならdueAtUtc、maxLatenessを固定順のUTF-8 JSON writerでserializeしてSHA-256を算出する。文字列をtrim・Unicode正規化・改行変換しない。object key順、整数表現、UTC表現をgolden testで固定する。raw path、CLI引数の並び順、表示alias、Immediate enqueue時の現在時刻はhashへ入れない。hashだけで同一判定せず、保存したcanonical intent bytesも一致確認する。
 
 同一キー同一意図は既存Post。同一キー別意図はConflict。途中のSNS失敗でPostを新規作成しない。failed対象のretryは、remote副作用がないと確定し元Scheduleがまだ有効な場合だけ同じPublicationとAttempt履歴を使う。ExpiredやUnknownは同じPublicationでpublish retryしない。意図的な再投稿は新しいPostとkey、元PostへのduplicateOfを保存する。
 
@@ -61,4 +62,8 @@ RemoteObjectがmediaの場合とfinal Postの場合を区別する。X media vie
 
 metrics snapshotは複数ページ・複数queryの一括成功を表すものと、個別responseのRaw recordを区別する。不完全収集はpartialとし、欠けた値を0で埋めない。
 
-即時投稿はSchedule.mode=Immediate、日時指定はAtTimeとする。Immediateの初回実行時刻は保存するがintentHashには現在時刻を入れず、modeのみを含める。PostRevisionは将来拡張を阻害しない保存境界であり、MVPに編集コマンドがあることを意味しない。
+即時投稿はSchedule.mode=Immediate、日時指定はAtTimeとする。Immediateの初回実行時刻は保存するがintentHashには現在時刻を入れず、modeとmaxLatenessを含める。PostRevisionは将来拡張を阻害しない保存境界であり、MVPに編集コマンドがあることを意味しない。
+
+## Job ownership
+
+JobのownerTypeとkindの組合せは閉じた表で管理する。Publish/Prepare/Poll/Reconcile/DeleteはPublication、RefreshはAuthGrant、StatsCollectはStatsSyncRun、PurgeはDataDeletionをownerにする。DBでは対応するnullable FKを1つだけ持たせるCHECK制約で表現し、文字列ownerIdだけに依存しない。新job kindの追加はmigrationとApplication handler登録を必要とし、未知kindを汎用実行しない。

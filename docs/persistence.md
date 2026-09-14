@@ -35,15 +35,17 @@ Linux XDG、macOS Application Supportのmappingは将来Infrastructureへ追加�
 | accounts | id、app_id、provider、remote_account_id、alias、grant_id、status、unique(app_id,provider,remote_account_id)、unique(alias) |
 | auth_grants | id、app_id、subject、scopes_json、vault_blob_id、generation、expires_at、status |
 | vault_blobs | id、purpose、key_version、nonce、tag、ciphertext、created_at |
-| posts | id、client_request_id unique、intent_hash、current_revision、created_at、duplicate_of |
+| posts | id、client_request_id unique、intent_hash、canonical_intent、current_revision、created_at、duplicate_of |
 | post_revisions | post_id、revision、content_id、intent_json、created_at、PK(post_id,revision) |
 | contents / media_assets | 本文/title/形式、hash、mime、size、duration、private storage_ref、reference count |
 | targets | id、post_id、revision、account_id、options_schema/version/json、visibility、unique(post_id,revision,account_id) |
-| schedules | id、mode、due_at_utc、original_local、zone_id、offset、tzdata_version、max_lateness、consent_at |
+| consent_records | id、target_id、kind、policy_version、recorded_at、evidence_digest |
+| schedules | id、mode、due_at_utc、original_local、zone_id、offset、zone_rules_fingerprint nullable、max_lateness |
 | publications | id、target_id unique、schedule_id、state、execution_mode、timestamps、safe_error_json、generation |
 | remote_objects | id、publication_id、account_id、kind、provider_object_id、parent_id、observed_state、timestamps、unique(account_id,kind,provider_object_id) |
-| jobs | id、publication_id/grant_id、kind、step_key、state、due_at、resume_state、generation、attempt_count |
-| attempts | id、job_id、step_key、dispatch_state、request_digest、effect_certainty、receipt_ref、safe_error、timestamps |
+| worker_runs / worker_control | run ID、process/started/stopped/heartbeat、stop_requested、maintenance_reason |
+| jobs | id、kind、publication_id/auth_grant_id/stats_sync_run_id/data_deletion_job_idのnullable FK、priority、step_key、state、due_at、resume_state、generation、attempt_count、worker_run_id、claimed_at |
+| attempts | id、job_id、step_key、dispatch_state、request_digest、effect、replay_safety、effect_certainty、receipt_ref、safe_error、timestamps |
 | provider_checkpoints | publication_id、adapter_key、schema_version、vault_blob_id、updated_at |
 | rate_limit_buckets | provider/app/account/endpoint key、remaining、reset_at、next_allowed_at、observed_at |
 | capability_snapshots | account_id、adapter_version、checked_at、expires_at、safe_payload |
@@ -61,9 +63,9 @@ remote_objectsのproviderは`account_id -> accounts.provider`で決まり、iden
 
 MetricsSnapshotはDomain契約どおりprovider / api_version / retrieved_atを直接保持する。複数Raw responseを1 snapshotへlinkしても、どのProvider/API世代・取得時点のprojectionかをjoin推測だけに依存させない。`created_at` はprojection行の作成時刻であり、remote取得時刻の代用にしない。
 
-必須indexはjobs(state,due_at)、publications(state)、targets(post_id)、remote_objects(account_id,kind,provider_object_id) unique、raw(expires_at)、snapshot(subject,period,retrieved_at)、observation(provider_key)。大きな時系列を全件読んでstats showしない。doubleでcountを丸めず、巨大countはdecimal文字列対応のCLI schemaとする。
+必須indexはjobs(state,priority,due_at)、jobs(worker_run_id,state)、publications(state)、targets(post_id)、remote_objects(account_id,kind,provider_object_id) unique、raw(expires_at)、snapshot(subject,period,retrieved_at)、observation(provider_key)。大きな時系列を全件読んでstats showしない。doubleでcountを丸めず、巨大countはdecimal文字列対応のCLI schemaとする。
 
-unique client_request_idとintent_hash照合を同一transactionで実行する。hash衝突だけをidentityにせず、canonical intentも比較可能にする。publish jobの重複active登録を防ぐ部分unique indexとgeneration CASを使う。成功済みPublicationにpublish jobを作れない不変条件もApplicationで検証する。
+unique client_request_idとintent_hash照合を同一transactionで実行する。hash衝突だけをidentityにせず、canonical_intent bytesも比較する。jobsはkindに対応するowner FKが1つだけnon-nullとなるCHECKを持つ。Publish/Prepare/Poll/Reconcile/Delete=publication、Refresh=auth_grant、StatsCollect=stats_sync_run、Purge=data_deletion_jobとする。active jobのowner＋kind＋step_key重複を防ぐ部分unique indexとgeneration CASを使う。成功済みPublicationにpublish jobを作れない不変条件もApplicationで検証する。Attemptにはcrash recoveryで必要なeffect/replay_safetyを保存し、adapter更新後の再計画だけから推測しない。
 
 ## Filesystemとのcommit境界
 
@@ -81,19 +83,25 @@ MVPは小規模運用として、圧縮後暗号化したmetrics responseをSQLi
 
 連番の埋込SQL migration、immutable checksum、schema_migrations tableを採用する。手書きSQLの対象DB versionとbackup方法をreviewする。既存migrationを書き換えず次versionで修正する。provider checkpoint/options/metric mapping versionはDB schema versionとは別。
 
-db migrateはworkerと書込CLIを停止するmaintenance lockを取得し、online backup、空き容量、整合性を確認する。transaction内で適用可能な変更は全体commit。table再構成はcopy・制約/件数確認・swapし、失敗時rollbackする。transaction外が必要な操作は明示段階とrecovery markerを持つ。
+db migrateはworker stop/drain後にmaintenance lockを取得し、online backup、空き容量、整合性を確認する。worker_controlの停止要求だけで排他取得済みとはみなさず、OS lock解放を確認する。transaction内で適用可能な変更は全体commit。table再構成はcopy・制約/件数確認・swapし、失敗時rollbackする。transaction外が必要な操作は明示段階とrecovery markerを持つ。
 
 新binary起動時に古いschemaなら送信を開始せずmigrationを案内する。新しすぎるschemaなら読書を拒否する。未読checkpointは新規publishに変換せずNeedsAttention。down migrationはMVPなし。復旧はbackup restoreだが必ずquarantineとなる。
 
 ## Backup / corruption / restore
 
-稼働中のDB file単体copyは禁止。SQLite online backup APIを使い、spool manifest/hashと参照素材を含めた整合backupを作る。WALを無視したcopyをbackup成功と呼ばない。quick_checkを起動時、integrity_checkをdb check/restore時に行う。異常時はremote mutationを止め、元DBを上書き修復しない。
+稼働中のDB file単体copyは禁止。db backupはworkerをdrainしてmaintenance lockを取得し、固定されたDB snapshotとspool manifest/hash、参照素材を1つのbackup setにする。SQLite online backup APIを使うが、DB取得後にworkerがspoolを変えないことをmaintenance lockで保証する。WALを無視したcopyをbackup成功と呼ばない。quick_checkを起動時、integrity_checkをdb check/restore時に行う。異常時はremote mutationを止め、元DBを上書き修復しない。
 
 default backupは同一PCのACL保護領域、7日rotation。DBには本文・ID等の平文個人情報があり、token暗号化だけでbackup全体が秘密化されたとは説明しない。外部持出しは利用者管理の暗号化volume等を必要条件とする。
 
 master keyはDB backupへ平文同梱しない。同一profileで復号可能かrestore時に確認する。別PCでkeyがない場合、token/checkpointは復号できず再認証とremote照合が必要。keyを失ったupload sessionは安全に新uploadへ置き換えられない。MVPではportable key exportを提供しない。
 
 restoreは全jobをquarantineし、復元時点より後のremote副作用が存在し得ることを提示する。ローカル記録が古い場合の自動再投稿をしない。[復旧詳細](scheduling.md)
+
+## Restoreの実行契約
+
+db restore FILEは既存workerをdrainし、現在DBの退避backupを作ってから、入力backupのmanifest/hash・DB integrity・master key復号可否を検査する。成功後も通常workerを起動せずinstallations.quarantined=1とする。restore statusは送信副作用を持ち得るPublicationを、既知remote IDあり、強い照合可能、照合不能、確実に未送信の候補に分類して表示する。
+
+quarantine中に許すremote操作はread/reconcileだけ。利用者は確認済みremote IDをpost attachで所有確認して関連付けるか、db restore suppressで対象をNeedsAttentionに固定して全mutation jobをCancelledにする。suppressはremoteに存在しないと断定せず、不確実性と理由を監査履歴へ残す。別の新規投稿はquarantine解放後に新keyで行う。restore releaseは、復元時点以降に実行された可能性がある全publish系jobが安全な終端または送信禁止状態になったことをtransactionで検査し、安全なread/cleanup jobだけを解放する。未解決対象をPendingとして再送できるforce flagは設けない。元DBを消去せず、切戻しにも同じ検査を要求する。
 
 ## Retentionと削除
 

@@ -45,7 +45,7 @@ native schedulingの「確認なし」はSNSアプリ画面で予約できない
 
 POST /2/tweets、DELETE /2/tweets/:id。動画はv2 media initialize / append / finalize / statusを経てmedia IDをPostへ添付する。media IDとPost IDを区別する。作成APIに一般的なidempotency-keyの保証を確認できないため、送信後timeoutはUnknown。文字列一致・時刻一致による自動成功認定はしない。[Create Post（本文）](https://docs.x.com/x-api/posts/create-post)
 
-現行のX API v2 Media Introduction本文で確認できるupload上限は画像5MB、animated GIF 15MB、動画512MB（同ページでは `media_category=amplify_video` と記載）。以前設計に混在していた「非Premium 8GB / Premium・verified 16GB」はこのAPI本文では確認できず、Web/UI側の投稿条件を通常API upload制約へ流用しない。`tweet_video` を含むmedia categoryごとのduration・size・codec・account entitlementは **IMPLEMENTATION-TIME CHECK REQUIRED** とし、X Phaseの公式本文・契約テストで確定した値だけをAdapter validationへ入れる。[Media（本文）](https://docs.x.com/x-api/media/introduction)
+現行のX API v2 Media Introduction本文で確認できる上限は画像5MB、animated GIF 15MB。通常Post動画の `tweet_video` / `amplify_video` は非Premiumで20分/8GB、Premium・verifiedで125分/16GB、最短0.5秒である。512MB/140秒は非Premiumの `dm_video` で、通常Postへ流用しない。upload成功後もPost添付時に利用者entitlementが再検査されるため、account状態・codec・解像度・frame rateは **IMPLEMENTATION-TIME CHECK REQUIRED** とし、実行直前にもcapability/validationを行う。[Media（本文）](https://docs.x.com/x-api/media/introduction)
 
 長文・文字数計算・画像枚数はaccount/endpoint条件をadapterで検証。MVPは通常Post、画像最大4枚、動画1本の限定profileを実機契約テストで確定し、拡張長文・GIF・threadは後回し。ユーザーの本文を自動切り詰めしない。
 

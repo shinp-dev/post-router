@@ -45,6 +45,8 @@ Capabilitiesのキャッシュは助言であり認可証明ではない。enque
 
 ApplicationはAttempt=DispatchPreparedをDBへcommitしてからexecuteStepを呼び、返却されたReceiptをDBへcommitする。**1回のexecuteStep内で次の公開危険stepまで連続実行しない。** 新しいremote handleを得たら必ず呼出し元へ返し、durable保存の境界を作る。upload chunksもack済みoffsetを保存してから進む。
 
+worker内で複数stepを並行実行しても、同一ownerと同一provider/accountのmutationはkeyed semaphoreで直列化する。DBのOS lockはprocess間のcoordinator排他、keyed semaphoreはprocess内のoperation排他という別の役割を持つ。priorityや並行数はAdapterへ漏らさずApplication dispatcherが所有する。shutdown cancellationを受けたexecuteStepは、送信開始後ならCancelledを成功/失敗の証拠にせずAmbiguousになり得る。
+
 ## 結果型
 
 StepResultはCompleted / Pending / Rejected / Ambiguous。remote handles、opaque checkpoint、observed state、safe diagnostics、rate/quota observationsを含む。Completedでもworkflow完了とは限らない。
@@ -71,9 +73,9 @@ TikTokを「uploadは常に副作用なし」と扱わない。YouTube native予
 | Validation / Unsupported / PolicyBlocked | FailedまたはNeedsAttention | 入力/条件変更までなし |
 | AuthExpired | grant refresh job、対象を待機 | refresh成功後、元操作のreplay safetyに従う |
 | AuthRevoked / ScopeMissing | ReauthRequired / NeedsAttention | 自動loginなし |
-| RateLimited | RetryWaitingとbucketのnextAllowedAt | provider時刻/Retry-After以降 |
+| RateLimited | Publication段階を維持しJob.dueAtを延期 | provider時刻/Retry-After以降 |
 | QuotaExhausted | 待機またはNeedsAttention | quota reset後。残高不足は入金待ち |
-| TemporaryUnavailable | 安全read等はRetryWaiting | backoff |
+| TemporaryUnavailable | Publication段階を維持し安全なJobだけ延期 | backoff |
 | AmbiguousSideEffect | Unknown | read照合のみ |
 | MalformedResponse / ContractChanged | 無副作用ならNeedsAttention、副作用不明ならUnknown | 盲目的retryなし |
 | RemoteRejected / Removed | Failed/availability更新 | 再投稿なし |

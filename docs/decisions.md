@@ -31,11 +31,11 @@ Microsoft.Data.Sqliteによる明示SQLを選び、queueの条件付き更新を
 | メモリtimerのみ | 再起動で消失するため不採用 |
 | OS taskを投稿ごとに登録 | DBと二重の真実になるため不採用 |
 | Quartz / Hangfire | 機能は豊富だが投稿状態とjob状態の二重管理を増やす。初期は不採用 |
-| SQLite Jobs + Generic Host loop | 採用。単発時刻・再試行・照合のみを扱う |
+| SQLite Jobs + Generic Host loop | 採用。1 coordinator process内の期限優先・上限付きdispatcher |
 | Windows Service | system権限・ユーザーvault差・管理者操作が増えるため不採用 |
 | クラウドworker | 電源OFF対策になるが、運用範囲を拡大するためMVP外 |
 
-独自実装するのは限定的な永続job loop。cron式・分散lease・leader election・任意workflow DSLは実装しない。
+独自実装するのは限定的な永続job loop。global同時operation数は初期2、同一owner/provider-accountは1、bulk/低priorityは1として、もう1 slotを期限付きpublish等に予約し、長時間uploadが別SNSのdue publishを塞がないようにする。値は性能最適化前の安全な初期値で、providerの実制約を超えて増やさない。cron式・分散lease・leader election・任意workflow DSLは実装しない。
 
 ## ADR-004: 暗号化vaultとOS key store
 
