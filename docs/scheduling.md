@@ -2,6 +2,8 @@
 
 設計契約 v1 / 2026-09-14。予約は「希望公開時刻」の契約であり、全SNSで同時刻の公開を保証する契約ではない。
 
+`Schedule.dueAtUtc` はユーザーが `--at` で指定した**希望公開時刻**を表す。一方、`Job.dueAt` はprepare/upload/poll/reconcile等の**次のローカル操作を実行してよい時刻**であり、同じ `dueAt` という語でも所有モデルが違う。native予約の準備JobはScheduleより前に実行できるが、providerへ渡す `publishAt` はScheduleの希望公開時刻である。local公開の最終publish requestはScheduleの希望公開時刻より前に開始しない。公開完了時刻そのものはprovider処理・network・moderationにより保証できない。
+
 ## 実行方式
 
 | 方式 | 採用対象 | 稼働条件 |
@@ -13,7 +15,7 @@
 
 ApplicationはScheduleとProviderの実行計画を組み合わせる。実行方式はPublicationに固定保存する。native登録の失敗・タイムアウトを理由にlocalへ自動切替しない。登録済みでないと証明でき、再計画が安全な場合のみ明示変更する。
 
-準備と公開を分離する。YouTubeはenqueue後なるべく早くprivate upload・予約登録を行う。XのmediaやIGのcontainerは有効期限があるため、adapterの確認済み期限と推定upload時間から準備時刻を決める。期限未確認のstagingを長期予約時に先行生成しない。準備完了してもlocal公開はdueAt前に送らない。
+準備と公開を分離する。YouTubeはenqueue後なるべく早くprivate upload・予約登録を行う。XのmediaやIGのcontainerは有効期限があるため、adapterの確認済み期限と推定upload時間からprepare JobのdueAtを決める。期限未確認のstagingを長期予約時に先行生成しない。準備完了してもlocal公開はSchedule.dueAtUtc前に送らない。
 
 ## 状態機械
 
@@ -41,7 +43,7 @@ stateDiagram-v2
 
 | 現在の条件 | 遷移・操作 |
 | --- | --- |
-| localの未送信、dueAt到来 | ReadyからPublishing。Attempt intentを先にcommit |
+| localの未送信、Schedule.dueAtUtc到来 | ReadyからPublishing。Attempt intentを先にcommit |
 | native登録成功 | ScheduledRemote。公開確認pollを予約 |
 | 安全な操作に対する一時障害 | RetryWaiting。resumeStateとnextAllowedAtを保存し、元段階へ戻る |
 | 公開し得るrequestが成否不明 | Unknown。publish retryを禁止しreconcile jobのみ |
@@ -49,7 +51,7 @@ stateDiagram-v2
 | 審査中・transcoding | Processing。provider handleで追跡 |
 | inbox等で人間の操作が必要 | AwaitingUser。Publishedと表示しない |
 | 結果が確定した拒否 | Failed。修正可能性と再実行の安全性を別々に記録 |
-| 未送信のまま遅延期限超過 | Expired。勝手な翌日投稿をしない |
+| 未送信のまま遅延期限超過 | Expired。勝手な翌日投稿をしない。同じ予約をretryして後から公開せず、新しい公開意図・時刻として再登録する |
 | 取消要求 | CancelRequested。未送信ならCancelled、remote操作が必要なら確認まで保留 |
 
 Processing/UnknownからFailedへ移すにはremote失敗の証拠が必要。管理上のpoll上限に達しただけならNeedsAttention。Unknown/NeedsAttentionでも後から公開が確認されればPublishedへ移す。公開履歴は削除しない。
@@ -83,7 +85,7 @@ DispatchPreparedは「送信済み」と「送信直前crash」を区別でき�
 
 YouTubeはresumable session URIを最初に暗号化保存し、serverが認めたoffsetへresumeする。最終response喪失時はsession照会を先に使う。session失効と未公開動画不存在は同義でなく、新規uploadを自動開始しない。ID保存後の公開更新も、現在状態を読んでから必要な更新だけ行う。
 
-IGはcontainer IDを保存し、FINISHED/PUBLISHED等を解釈する。PUBLISHEDだがmedia ID不明なら公開済み証拠を残し、ID回収待ちにする。新containerで再投稿しない。Xはmedia ID保存後のPost createが曖昧ならUnknown。直近timelineに似た投稿がないことは不存在の証明ではない。
+Instagramはcontainer IDと確認できたprocessing statusを保存する。ただし `media_publish` response喪失後にcontainerだけから「公開済み」と証明できるか、final Media IDをoperationへ一意に結び付けて回収できるかはG-IGで未確認である。確認済み公式契約がない限り、そのケースはUnknown→reconcileとし、自動media_publish再送・新container作成をしない。Xはmedia ID保存後のPost createが曖昧ならUnknown。直近timelineに似た投稿がないことは不存在の証明ではない。
 
 ## 保証範囲と冪等性
 
@@ -110,13 +112,13 @@ token refreshは同一AuthGrantで直列化し、新token保存後に安全性�
 
 ## 時刻・遅延・DST
 
-保存する値は入力local time、IANA zone、選択offset、dueAtUtc、変換時のtimezone data識別情報。offsetだけの入力も許容する。zoneとoffsetの両指定は整合性を検証する。Windows zone名は明示mappingで扱う。存在しないDST時刻は拒否、二重に存在する時刻はoffset指定を要求する。
+Scheduleに保存する値は入力local time、IANA zone、選択offset、dueAtUtc、変換時のtimezone data識別情報。ここで `Schedule.dueAtUtc` は希望公開時刻である。Jobの `dueAt` はprepare/poll/reconcileを含む次操作の時刻で、Scheduleの意味を上書きしない。offsetだけの入力も許容する。zoneとoffsetの両指定は整合性を検証する。Windows zone名は明示mappingで扱う。存在しないDST時刻は拒否、二重に存在する時刻はoffset指定を要求する。
 
-MVPでは日付なしの20:00や自然言語を受け付けない。秒の丸めは勝手にしない。providerが秒精度を持たない場合は計画に示す。保存後のtimezone rule更新でdueAtUtcを勝手に変えない。
+MVPでは日付なしの20:00や自然言語を受け付けない。秒の丸めは勝手にしない。providerが秒精度を持たない場合は計画に示す。保存後のtimezone rule更新でSchedule.dueAtUtcを勝手に変えない。
 
-wall clock UTCでdue判定、monotonic clockで待機・timeoutを測定する。最大30秒ごと、およびresume通知時にdueを再評価する。時計が前進すればmissed policy、後退すれば既に完了したjobは再実行しない。実際のUTC精度はOS時刻同期に依存し、doctorで異常を示す。
+wall clock UTCでJobのdue判定、monotonic clockで待機・timeoutを測定する。最大30秒ごと、およびresume通知時にdueを再評価する。時計が前進すればmissed policy、後退すれば既に完了したjobは再実行しない。実際のUTC精度はOS時刻同期に依存し、doctorで異常を示す。
 
-default maxLatenessは15分。範囲内ならできるだけ早く送信しlateを記録、超過なら未送信対象のみExpired。公開時刻はupload/processing/moderationによって遅れ得る。dueAtはlocalの最終公開requestを開始できる最早時刻であり、公開完了deadlineではない。締切までに既に送信したものをExpiredへ変えて不存在扱いにしない。登録済みnative予約も遅延policyだけでは取り消されない。
+default maxLatenessは15分。local publishのSchedule.dueAtUtcを過ぎても範囲内ならできるだけ早く送信しlateを記録、超過なら未送信対象のみExpired。公開時刻はupload/processing/moderationによって遅れ得る。Schedule.dueAtUtcは公開完了deadlineではなく、local方式では最終公開requestを開始できる最早時刻でもある。締切までに既に送信したものをExpiredへ変えて不存在扱いにしない。登録済みnative予約も遅延policyだけでは取り消されない。
 
 ## Windows運用
 
@@ -138,4 +140,4 @@ backup復元は全worker停止、db整合検査、vault確認の後、restore qu
 
 YouTube nativeは初期policyとして、upload見積時間に加えて最低5分の登録余裕を計画に要求する。enqueue時点で満たせない日時はvalidation errorとし、ユーザーが日時を選び直す。これはAPI規定値ではなく本ツールの安全余裕である。uploadが遅れて登録余裕を失った場合はNeedsAttentionとし、過去publishAtを新規送信しない。ネットワーク越しにprovider受信時刻を厳密制御できないため、送信前検査でも遅延公開の可能性は残る。既に登録済みか不明なら同じvideo IDを照合し、日時を書き換えて再送しない。
 
-ImmediateのdueAtは初回enqueue時刻。worker不在/停止で遅れた場合も既定のmaxLatenessを適用し、保存成功を公開成功と誤表示しない。
+ImmediateのSchedule.dueAtUtcは初回enqueue時刻。worker不在/停止で遅れた場合も既定のmaxLatenessを適用し、保存成功を公開成功と誤表示しない。
