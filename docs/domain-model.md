@@ -13,10 +13,10 @@
 | Content | id、kind、text、title、mediaAssets | TextOnly / ImageSet / Video。意味的入力でありwire DTOではない |
 | MediaAsset | id、sha256、sizeBytes、detectedMime、duration、width、height、storageRef | 予約は固定コピーのみ参照。original pathを後日読み直さない |
 | Target | id、postId、revision、accountId、visibilityIntent、optionsSchema、optionsVersion、optionsPayload | provider固有optionsはadapter所有の検証済み契約。secret不可 |
-| Schedule | id、requestedLocalTime、zoneId、offset、dueAtUtc、maxLateness、consentAt | 同一時刻をUTCで保存。曖昧DSTを黙って補正しない |
+| Schedule | id、requestedLocalTime、zoneId、offset、dueAtUtc、maxLateness、consentAt | dueAtUtcは希望公開時刻。曖昧DSTを黙って補正しない。prepare/poll等の実行時刻はJob.dueAtへ置く |
 | Publication | id、targetId、scheduleId、state、executionMode、createdAt、firstSubmittedAt、confirmedAt、publishedAt、lastError、attemptCount | 実行状況の正本。Targetごとに1つ。結果が不明ならPublishedにもFailedにも確定しない |
 | RemoteObject | id、publicationId、kind、providerObjectId、parentObjectId、visibility、remoteCreatedAt、remotePublishedAt、observedAt | upload/container/publish handle/final objectのIDを混同しない。1 Publicationに複数可 |
-| Job | id、publicationIdまたはgrantId、kind、dueAt、state、generation、attemptNo | 投稿・照合・stats・refresh・cleanupの永続実行単位 |
+| Job | id、publicationIdまたはgrantId、kind、dueAt、state、generation、attemptNo | 投稿・照合・stats・refresh・cleanupの永続実行単位。dueAtは次のローカル操作時刻でSchedule.dueAtUtcとは別意味 |
 | Attempt | id、jobId、publicationId、stepKey、dispatchState、startedAt、finishedAt、requestDigest、effectCertainty、safeError | HTTP前のintentとHTTP後のreceiptを区別 |
 | ProviderCheckpoint | publicationId、adapterKey、schemaVersion、payloadRef、updatedAt | Adapterのみ解釈。機密URLを含み得るので暗号化 |
 | StatsSyncRun | id、scope、state、requestedAt、finishedAt、safeError | 投稿公開状態とは独立した収集run。partialを表現 |
@@ -45,13 +45,15 @@ TikTokのprivacy選択・商用開示・同意記録、YouTube madeForKids・for
 
 ローカルIDはUUID、remote IDはopaque string。64bitを超える値や先頭0を数値化しない。publishedAtがremoteから得られない場合はnullとし、observedAtを代入しない。希望時刻、送信時刻、remote作成時刻、公開確認時刻、統計期間は別。
 
+`Schedule.dueAtUtc` は希望公開時刻、`Job.dueAt` は次のローカル処理時刻。native schedulingの事前upload/登録JobはScheduleより早く実行できるが、希望公開時刻そのものをprepare時刻へ書き換えない。
+
 Post全体の状態は子Publicationの集約表示（AllPending / InProgress / AllPublished / Partial / NeedsAttention等）。集約を子への指示として使わない。一部成功をall-successにしない。
 
 ## 冪等性と改訂
 
 clientRequestIdはinstallation内でunique。intentHashはUTF-8本文、title、素材hash、解決済みaccount IDs、schedule UTC、options version/内容を決定的にserializeして算出。raw path、CLI引数の並び順、表示aliasをhashの意味にしない。
 
-同一キー同一意図は既存Post。同一キー別意図はConflict。途中のSNS失敗でPostを新規作成しない。failed対象のretryは同じPublicationとAttempt履歴を使う。意図的な再投稿は新しいPostとkey、元PostへのduplicateOfを保存する。
+同一キー同一意図は既存Post。同一キー別意図はConflict。途中のSNS失敗でPostを新規作成しない。failed対象のretryは、remote副作用がないと確定し元Scheduleがまだ有効な場合だけ同じPublicationとAttempt履歴を使う。ExpiredやUnknownは同じPublicationでpublish retryしない。意図的な再投稿は新しいPostとkey、元PostへのduplicateOfを保存する。
 
 ## Metricsのsubject
 
