@@ -17,7 +17,7 @@
 | post [inline options] / post --file FILE | 全対象preflight、素材固定、queue登録 |
 | post status ID | 保存状態表示。--refreshで照合jobを依頼 |
 | post cancel ID --target ALIAS | 予約取消要求。公開済み削除とは別 |
-| post retry ID --target ALIAS | 確実に未公開のfailed/expiredを明示的に再開。Unknownには無効 |
+| post retry ID --target ALIAS | 確実に未公開のFailedを、元のscheduleがまだ有効な場合だけ明示的に再開。Unknown/Expiredには無効 |
 | post reconcile ID --target ALIAS | 成否照合。確認不足ならNeedsAttentionのまま |
 | post attach ID --target ALIAS --remote-id ID | 自分の既存投稿をAPIで所有者検証して関連付ける |
 | post duplicate ID --idempotency-key KEY | 再投稿という新しい意図。Unknownが残る対象では明示的リスク受領を要求 |
@@ -35,6 +35,8 @@
 ## 共通投稿入力
 
 `--text` またはUTF-8 `--text-file`、`--image`（複数指定可）、`--video`（1本）、`--title`、`--to`、`--visibility`、`--at`、`--tz`、`--options-file`、`--idempotency-key`。imagesとvideoを同時指定する混在投稿はMVPで拒否する。音声のみ、thread、carouselは将来拡張。
+
+`--at` はAPI request開始時刻ではなく**希望公開時刻**。native schedulingでは準備/upload/予約登録をそれより前に行ってproviderへ同じ希望時刻を渡し、local schedulingではその時刻より前に最終publish requestを送らない。provider processingやnetworkにより実際の公開完了は遅れ得る。この意味はProviderによって変えない。[予約・復旧](scheduling.md)
 
 textはX本文、IG caption、TikTok caption、YouTube descriptionへAdapterがmappingする。YouTube titleをtextから勝手に生成しない。YouTubeの公開範囲・子ども向け設定・必要な開示を入力しない場合は拒否する。Instagramはaccount公開設定に依存し、providerに存在しないprivate指定は拒否する。
 
@@ -88,6 +90,7 @@ textはX本文、IG caption、TikTok caption、YouTube descriptionへAdapterがm
 - noninteractiveのpostはclientRequestId必須。対話時は生成IDを表示する。同じキー＋同じ内容は同じPostを返し、同じキー＋異なる内容はConflict。
 - 同じ動画でも異なる日時の投稿は別の意図。file hash単独で重複排除しない。
 - `--at "20:00"` は日付不明のためMVPでは拒否。日付＋timezone、またはoffset付きISO 8601を使う。
+- Expiredは「元の希望公開時刻を過ぎ、許容遅延も超えた」状態なので `post retry` で遅れて公開しない。公開したい場合は新しい希望時刻・新しいidempotency keyのPostとして登録する。
 - enqueue後の入力はimmutable。MVPにin-place予約編集コマンドは設けない。未送信の取消確認後、新しいkeyで登録する。将来の編集は新revisionとし、native予約済みならprovider取消/更新の確認を必要とする。
 - 保存成功後にCLI応答を失っても、同じidempotency keyで復帰する。
 - post既定はqueue登録で終了。worker稼働中なら処理される。`--wait` は状態を待つだけ。worker不在では永続化した上でwarningを返し、実行済みと表示しない。
@@ -113,4 +116,4 @@ textはX本文、IG caption、TikTok caption、YouTube descriptionへAdapterがm
 
 --options-fileはschemaVersionとaccounts（解決対象aliasをkeyにしたoptionsVersion/optionsのmap）を持つ。manifestとinlineの混在は拒否し、共通flagとprovider optionsの同一意味の競合も拒否する。options-fileはvisibilityを上書きしない。異なるvisibilityが必要ならmanifestを使う。例のYouTube optionsにはmadeForKids、containsSyntheticMedia、hasPaidProductPlacement等を本人が明示する。
 
---at省略はImmediateという意図。初回enqueue時刻を実行dueAtにするが、再入力ごとの現在時刻をidempotency digestへ含めない。同じkeyの即時投稿を再実行しても既存Postへ戻る。
+--at省略はImmediateという意図。初回enqueue時刻をSchedule.dueAtUtc（希望公開時刻）にし、初回Jobも即時dueにするが、再入力ごとの現在時刻をidempotency digestへ含めない。同じkeyの即時投稿を再実行しても既存Postへ戻る。
