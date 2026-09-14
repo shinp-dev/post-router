@@ -6,6 +6,8 @@
 
 「本文」は公式ページ本文を取得確認。「検索」は公式ページの検索結果に記載された内容のみ確認。「設計」は本ツールの選定でありproviderの保証ではない。Metaの複数ページは429/取得制限で本文未取得。公式検索結果・Meta公式Postman例を補助に用いたが、未取得部分を確認済みにしない。ブログ、フォーラム投稿、第三者SNS SDKの実装だけを仕様の根拠にしていない。
 
+監査状態は次の語彙で明示する。**CONFIRMED** は対象の現行公式本文または公式提供資料の本文を確認済み、**UNCONFIRMED** は根拠本文を確認できていないため実装定数・release条件へ昇格してはいけない、**IMPLEMENTATION-TIME CHECK REQUIRED** はAPI能力自体が存在していてもapp/account/Console/version等の実環境条件を実装Phaseで再確認する必要がある、の意味とする。検索snippetだけの数値・権限・期限はCONFIRMEDにしない。
+
 ## Capability Matrix
 
 ○=APIあり、条件=権限・審査・形式等の制約あり、対象外=調査対象の通常APIにない/確認できない。**API能力と本プロジェクトで利用可能かは別**。
@@ -19,8 +21,8 @@
 | Native scheduled publish | 通常v2 Postでは確認なし | Content Posting APIでは確認なし | ○ privateかつ未公開動画のpublishAt | 通常content publishingでは確認なし |
 | Local scheduled dispatch | ○ | Direct Postのpolicy/UX gateによりMVP無効 | ○ ただしnative優先 | ○ 有効なupload経路が必要 |
 | Analytics | 条件 public/owned/media指標 | 条件 Displayの公開動画基本値。詳細watch等は別製品 | 条件 owner OAuth、DataとAnalyticsを分離 | 条件 Professional Insights、形式・権限別 |
-| Delete remote content | ○ 自分のPost | Content Posting/Displayで公開済み削除を確認できず | ○ videos.delete | APIありとの公式記載。login別権限の詳細確認までMVP無効 |
-| OAuth更新 | ○ offline.accessでrefresh token | ○ rotating refresh token | ○ refresh token、失効あり | ○ long-lived access tokenを更新。別refresh tokenではない |
+| Delete remote content | ○ 自分のPost | Content Posting/Displayで公開済み削除を確認できず | ○ videos.delete | **UNCONFIRMED**。login別権限・対象形式を確認するまでMVP無効 |
+| OAuth更新 | ○ offline.accessでrefresh token | ○ rotating refresh token | ○ refresh token、失効あり | 条件 long-lived access token更新。詳細はG-IGで再確認 |
 | App審査 | developer app・利用契約・権限が必要 | scope審査＋公開Direct Post audit。用途適合も必要 | OAuth検証とupload公開制限解除のauditは別 | 自己管理Standardと外部Advancedで異なる。Advancedはreview |
 | Account制約 | user-contextで本人投稿 | creator infoで公開範囲・長さ確認。未auditはprivate制限 | 認可したチャンネル。API keyだけでは投稿不可 | Business/Creator。一般Personalは対象外 |
 | Webhook | X Activity/Webhooksあり、契約・購読範囲別 | publish結果通知あり | WebSubでupload/メタデータ更新。metrics pushではない | comments等あり。全metrics通知を前提にしない |
@@ -28,13 +30,22 @@
 
 native schedulingの「確認なし」はSNSアプリ画面で予約できないという意味ではない。X Ads等の別契約APIを混ぜない。nativeなしでも上位のScheduleIntentは同じで、ローカル側の実行条件を返す。
 
+### Provider別監査状態
+
+| Provider | 現時点の状態 | releaseへの意味 |
+| --- | --- | --- |
+| X | 投稿/OAuth/rate limit/media v2の基本経路は **CONFIRMED**。価格・account entitlement・media categoryごとの実効制約は **IMPLEMENTATION-TIME CHECK REQUIRED** | G-Xを閉じた形式だけ有効化 |
+| TikTok | Direct Postの私用utility不適合、unaudited制限、主要転送/token条件は **CONFIRMED** | 本用途のDirect Postはpolicy-blocked |
+| YouTube | videos.insert、resumable、publishAt、delete、Data/Analyticsの基本経路は **CONFIRMED**。project audit/quota/OAuth公開状態は **IMPLEMENTATION-TIME CHECK REQUIRED** | G-YTを閉じてpublic/nativeを有効化 |
+| Instagram | Professional account、Instagram Login用scope、container→publishの基本段階はMeta公式Postmanでも確認。canonical developer本文を取得できない細部は **UNCONFIRMED / IMPLEMENTATION-TIME CHECK REQUIRED** | G-IGが閉じるまで公開機能をreleaseしない |
+
 ## X
 
 ### 投稿・形式・回復
 
 POST /2/tweets、DELETE /2/tweets/:id。動画はv2 media initialize / append / finalize / statusを経てmedia IDをPostへ添付する。media IDとPost IDを区別する。作成APIに一般的なidempotency-keyの保証を確認できないため、送信後timeoutはUnknown。文字列一致・時刻一致による自動成功認定はしない。[Create Post（本文）](https://docs.x.com/x-api/posts/create-post)
 
-現行media説明の上限は画像5MB、animated GIF 15MB。動画は非Premiumで20分/8GB、Premium・verifiedで125分/16GB、最短0.5秒。旧来の「全動画140秒/512MB」は現行Post動画の共通上限として採用しない。upload可否とPostへの添付可否は別に検証される。[Media（本文）](https://docs.x.com/x-api/media/introduction)
+現行のX API v2 Media Introduction本文で確認できるupload上限は画像5MB、animated GIF 15MB、動画512MB（同ページでは `media_category=amplify_video` と記載）。以前設計に混在していた「非Premium 8GB / Premium・verified 16GB」はこのAPI本文では確認できず、Web/UI側の投稿条件を通常API upload制約へ流用しない。`tweet_video` を含むmedia categoryごとのduration・size・codec・account entitlementは **IMPLEMENTATION-TIME CHECK REQUIRED** とし、X Phaseの公式本文・契約テストで確定した値だけをAdapter validationへ入れる。[Media（本文）](https://docs.x.com/x-api/media/introduction)
 
 長文・文字数計算・画像枚数はaccount/endpoint条件をadapterで検証。MVPは通常Post、画像最大4枚、動画1本の限定profileを実機契約テストで確定し、拡張長文・GIF・threadは後回し。ユーザーの本文を自動切り詰めしない。
 
@@ -110,33 +121,35 @@ WebSub通知はuploadとtitle/description更新等で、完全な公開確認や
 
 ### 対象と認証経路
 
-Business/CreatorのProfessional accountが対象。Instagram Loginを採用し、Facebook Login＋Page連携はMVP外。両loginのscope/token/hostを混在させない。[Instagram Login（検索）](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login)
+Business/CreatorのProfessional accountが対象。Instagram Loginを採用し、Facebook Login＋Page連携はMVP外。両loginのscope/token/hostを混在させない。Meta公式PostmanのInstagram Login collectionでもProfessional accountと `instagram_business_basic` / `instagram_business_content_publish` を確認できる。[Meta公式Postman](https://www.postman.com/meta/instagram/folder/1z5vxzu/instagram-api-with-instagram-login)
 
 自己管理accountはStandard、他人のaccountに提供する場合はAdvanced Access / App Reviewを考慮する。[Insights access（検索）](https://developers.facebook.com/documentation/instagram-platform/insights)、[App Review（検索）](https://developers.facebook.com/documentation/instagram-platform/app-review)
 
-OAuth authorization codeを受け、api.instagram.com/oauth/access_tokenで交換。long-lived化し、24時間以上経過・未失効のlong-lived access tokenをrefreshして60日間有効にする。別のrefresh_tokenがあると仮定しない。[Business Login（検索）](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login)、[Refresh（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/refresh_access_token)
+OAuth authorization code交換、long-lived化・更新方式、callback制約のcanonical developer本文は今回安定取得できていない。検索結果ではlong-lived token更新の経路が確認できるが、token寿命・更新可能時期・redirect要件を **UNCONFIRMED** のままG-IGへ残す。別のrefresh_tokenがある一般OAuthモデルへ押し込まない。[Business Login（検索）](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login)、[Refresh（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/refresh_access_token)
 
-採用scopeはinstagram_business_basic、instagram_business_content_publish、statsはinstagram_business_manage_insights。publish scopeの正式一覧、token交換・callback条件をG-IGで最終照合する。旧business_*名・Facebook Login用instagram_basic等を混用しない。DELETE追加scopeは未確定のためenabledにしない。
+採用候補scopeはinstagram_business_basic、instagram_business_content_publish、statsはinstagram_business_manage_insights。前2つはMeta公式Postmanで確認できる。Insights scope、token交換・callback条件、Standard/Advancedの正確な境界はG-IGで最終照合する。Facebook Login用instagram_basic等を混用しない。DELETE追加scopeは未確定のためenabledにしない。
 
 ### 投稿・制約
 
-media container作成→処理状態確認→media_publishの段階を分ける。container IDと公開media IDは別。Meta公式PostmanのFacebook Login例でもこの段階差を確認できるが、同例のhost/tokenをInstagram Loginへコピーしない。[Meta公式例（本文）](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)
+media container作成→処理状態確認→media_publishの段階を分ける。container IDと公開media IDは別。Meta公式Postman例でもcontainer status `FINISHED` と `media_publish` の返すMedia IDが別段階であることを確認できる。例のhost/token・Facebook Login固有値をInstagram Loginへコピーしない。[Meta公式例（本文）](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)
 
-JPEG画像、動画、Reels、carousel等のAPI投稿があり、100 API投稿/rolling 24hとの公式記載。text-onlyは対象外。native publish timeパラメータは確認できず、ローカルでmedia_publishを呼ぶ設計とする。[Content publishing（検索）](https://developers.facebook.com/documentation/instagram-platform/content-publishing)
+JPEG画像、動画、Reels、carousel等のAPI投稿があるとのcanonical検索結果は得ているが、形式別制約・rolling publishing limit・native schedule有無は本文未取得のものを含む。過去値や検索snippetの「100 API投稿/rolling 24h」を実装定数にしない。text-onlyは対象外。ローカル公開を採用する場合もG-IGで現行publish契約を確認する。[Content publishing（検索）](https://developers.facebook.com/documentation/instagram-platform/content-publishing)
 
-ローカル動画のresumable uploadを扱う公式ガイドが存在する。画像はMetaが取得できるHTTPS配信元を用意する設計。画像・Reelsの詳細最大サイズ/長さ・container TTL・upload session復旧仕様は本文未取得のため数値を確定しない。過去の8MB/1GB/15分/24h等を現行確認値として書き換えない。[Resumable（検索）](https://developers.facebook.com/documentation/instagram-platform/content-publishing/resumable-uploads.md)
+Meta公式PostmanのReels例は公開HTTPS `video_url`、container作成、status確認、media_publishを示す。一方、Instagram Loginのlocal/resumable upload、画像配信元、詳細最大サイズ/長さ・container TTL・upload session復旧仕様はcanonical本文確認まで **IMPLEMENTATION-TIME CHECK REQUIRED** とする。過去の8MB/1GB/15分/24h等を現行確認値として固定しない。[Meta公式Reels例](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api)、[Resumable（検索）](https://developers.facebook.com/documentation/instagram-platform/content-publishing/resumable-uploads.md)
 
-DELETEは現行IG Media referenceとchangelogに非広告投稿・Reels等の削除対応がある。昔の「Instagram APIは投稿削除不可」をそのまま採用しない。loginごとの権限名と対象条件を確認するまで、このツールでの削除はdeferred。[IG Media（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/instagram-media)、[Changelog（検索）](https://developers.facebook.com/documentation/instagram-platform/changelog)
+media_publishのresponse喪失後に、container状態やowner media一覧から**そのoperationに結び付いたfinal Media IDを安全に復旧できるか**は今回の公式本文で確認できていない。類似caption・時刻だけで自動成功認定しない。G-IGでreconciliation能力を確認できない場合、曖昧なpublishはUnknown→NeedsAttentionとし、自動media_publish再送や新container作成を禁止する。
+
+DELETEは現行IG Media reference/changelogの検索結果に削除対応を示す記載があるが、canonical本文とlogin別権限を今回確認できていないため **UNCONFIRMED**。このツールでのremote deleteはdeferred。[IG Media（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/instagram-media)、[Changelog（検索）](https://developers.facebook.com/documentation/instagram-platform/changelog)
 
 ### 料金・version・商用・webhook
 
-標準Instagram Platformについて一般的な投稿1回あたりの単価表は今回確認できない。無制限無料とは保証せず、Meta条件に加えて画像stagingの保管・通信費を別に見積もる。
+標準Instagram Platformについて一般的な投稿1回あたりの単価表は今回確認できない。無制限無料とは保証せず、Meta条件に加えて必要になったmedia stagingの保管・通信費を別に見積もる。
 
 Graph APIはadapterでサポートする明示versionへ固定する。「latest」自動追随は禁止。2026年の公式サイトにv25.0告知が見えるが、それだけで現在の最新versionや全機能対応versionを確定しない。G-IGで対象versionと終了日を確定し、pinする。
 
 商用投稿・paid partnershipの機能更新がある。商用開示の要否・API表現を確認してから当該形式をenabledにする。旧Instagram Basic Display等をPersonal投稿の代替に採用しない。旧metricsとviews移行はmetric単位で判定し、impressions/playsの全形式での現役使用を前提にしない。[Changelog（検索）](https://developers.facebook.com/documentation/instagram-platform/changelog)
 
-Webhookはcomments等の通知を提供するが、Instagram LoginのInsights webhookは非対応との記載。MVPはpollで統一。[Webhook例（検索）](https://developers.facebook.com/documentation/instagram-platform/webhooks/examples)、[Media Insights（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/instagram-media/insights)
+Webhookはcomments等の通知を提供するが、Instagram LoginのInsights webhookは非対応との検索記載がある。MVPはpollで統一し、webhookを前提にしない。[Webhook例（検索）](https://developers.facebook.com/documentation/instagram-platform/webhooks/examples)、[Media Insights（検索）](https://developers.facebook.com/documentation/instagram-platform/reference/instagram-media/insights)
 
 ## Metrics取得表
 
@@ -164,9 +177,9 @@ Xのnon-public/organic/promoted指標には投稿後30日という取得制約�
 
 | Gate | 未確定/外部条件 | 解消するPhase・証拠 | 未解消時 |
 | --- | --- | --- | --- |
-| G-X | Consoleの単価・account entitlement・endpoint最小scope | X PhaseでConsole条件記録＋契約テスト | 予算/対象形式を有効化しない |
+| G-X | Consoleの単価・account entitlement・endpoint最小scope・`tweet_video`等media categoryごとの現行制約 | X Phaseで公式本文/Console条件記録＋契約テスト | 予算/対象形式を有効化しない |
 | G-YT | OAuth公開状態、upload audit、project quota | YouTube Phaseで別々に確認 | private uploadとfakeを使い、public/native公開はblocked |
-| G-IG | login別scope、正式HTTPS callback要件、固定Graph version、画像/Reels上限、container TTL、resumable回復、rate headers、各metrics、保持条件 | Instagram Phase開始時に公式本文・app Dashboardとテストを照合し本書更新 | Instagram公開機能をreleaseしない |
+| G-IG | login別scope、callback/redirect契約、固定Graph version、画像/Reels上限、container TTL、local/resumable回復、`media_publish`曖昧結果の照合・final Media ID復旧、rate headers、各metrics、delete、token更新、保持条件 | Instagram Phase開始時にcanonical公式本文・Meta App Dashboard・契約テストを照合し本書更新 | Instagram公開機能をreleaseしない |
 | G-TT | 私用用途不適合、Direct Post UX、Display/Uploadの審査 | 方針変更/公式適合確認が必要。単なる実装テストで解消不可 | Direct Post無効。read/Uploadも別gate |
 | G-RET | providerごとの現行データ保持・削除条項 | 各provider Phaseの出荷前確認 | Raw長期保存無効。規約を確認できないproviderの収集は有効化しない |
 
