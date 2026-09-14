@@ -8,10 +8,10 @@
 | --- | --- | --- |
 | repo/config/logからtoken流出 | secretをvaultに限定、出力allowlist、機密URL除去 | 同一ユーザー権限のmalwareや管理者は保護対象外 |
 | 悪意あるpath/本文によるcommand injection | shell stringなし、argv、任意コマンド設定なし | media parser自体の脆弱性は更新・隔離が必要 |
-| callbackの偽装・code横取り | state、PKCE対応provider、単発callback、期限、固定redirect | browser/OS侵害は防げない |
+| callbackの偽装・code横取り | state、PKCE対応provider、単発callback、期限、provider確認済みredirect | browser/OS侵害は防げない |
 | 二重worker・不正なqueue改変 | OS lock、DB transaction、user ACL | 別installationまでglobal lockできない |
 | oversized/偽MIME/細工されたmedia | サイズ上限、magic+probe、制限付きprobe | 完全な無害性判定ではない |
-| staging URLの漏洩・SSRF | 専用prefix、短期read権限、URL入力の制限 | 公開URLを必要とするAPIへの露出は避けられない |
+| staging URLの漏洩・SSRF | 必要な場合だけ専用prefix、短期read権限、URL入力の制限 | 公開URLを必要とするAPIでは露出を避けられない |
 | DB破損・古いbackup復元 | online backup、check、restore quarantine | 失われた公開receiptは自動復元できない |
 
 ## Secret storage
@@ -32,30 +32,30 @@ OS credential storeは同じユーザーの悪意あるprocessから守る隔離
 
 | Provider | 採用flow | 更新・条件 |
 | --- | --- | --- |
-| X | 登録したNative public client、system browser、Authorization Code + PKCE、完全一致のloopback redirect | offline.accessを要求、期限前refresh。公開clientにsecretを捏造しない |
+| X | 登録したNative public client、system browser、Authorization Code + PKCE、登録済みloopback redirect | offline.accessを要求、期限前refresh。公開clientにsecretを捏造しない |
 | YouTube | Google Desktop app、system browser、loopback listener、PKCE、offline consent | refresh token保存。Testingの短期失効、verificationとupload auditを区別 |
 | TikTok | Desktop Login Kit、登録loopback path/port、PKCE。policy gate適合の用途に限る | token exchangeで要求されるclient secretは本人のvault。returned refresh tokenを保存 |
-| Instagram | Instagram Login、登録済み固定HTTPS callback、Authorization Code | long-lived access tokenへ交換し期限前refresh。通常のrefresh tokenモデルへ押し込まない |
+| Instagram | Instagram Login。callback/redirect方式とtoken更新契約はG-IGでcanonical公式本文を確認してから選定 | 一般的なrefresh_tokenモデルへ押し込まない。未確認の寿命・renewal時期を定数化しない |
 
-scope・endpoint・期限は[API調査](api-capability-research.md)が正本。AuthPortはrefresh方法をRefreshToken / RenewableAccessToken / Noneとして宣言する。一般論のOAuthライブラリがTikTokのPKCE表現等を自動解決すると仮定せず、公式test vector相当のfixtureで検証する。
+scope・endpoint・期限は[API調査](api-capability-research.md)が正本。AuthPortはrefresh方法をRefreshToken / RenewableAccessToken / Noneとして宣言するが、Instagramの値はG-IGを閉じるまでUnknown/disabledとする。一般論のOAuthライブラリがTikTokのPKCE表現等を自動解決すると仮定せず、公式test vector相当のfixtureで検証する。
 
 ユーザー自身のapp登録を前提とする。第三者配布のbinaryに共有client secretを埋め込まない。YouTube/Xのpublic clientと、secretを要するproviderを区別する。scopeは投稿/分析/削除ごとに最小化し、分析追加時だけ追加同意を求める。利用者の同意やアプリ審査をスコープ文字列だけで代替しない。
 
 ### Loopback callback
 
-listenerは127.0.0.1等のloopbackだけへbindし、全interfaceで待ち受けない。登録可能なport・pathの規則をproviderごとに検証する。Xは完全一致登録のportを使い、Google等の動的port可否を流用しない。開始前にbindを完了し、ランダムstate・PKCE verifierを生成する。stateは単回・短期有効、固定path、限定method、サイズ上限を検査する。
+loopbackを公式に認めるproviderではlistenerを127.0.0.1等のloopbackだけへbindし、全interfaceで待ち受けない。登録可能なport・pathの規則をproviderごとに検証する。X/Google/TikTokの規則を互いに流用しない。開始前にbindを完了し、ランダムstate・PKCE verifierを生成する。stateは単回・短期有効、限定method、サイズ上限を検査する。
 
 callbackはcodeやqueryをlogに残さず、照合後すぐtoken exchangeを行う。表示ページは外部script/imageを持たず、no-store、no-referrer、最小CSPを指定する。成功/失敗/timeoutでlistenerを閉じる。ブラウザ起動は許可したhttps認可URLのみをOS APIで開く。SNS投稿のブラウザ自動操作は行わない。
 
-### Instagram HTTPS callbackの境界
+### Instagram callbackの境界
 
-loopback対応が未確認のため、MVP設計は本人管理の固定HTTPS callbackと最小限の一回限りcode relayを条件とする。正確なredirect登録・client種別はG-IGの確認完了が必要。[公式redirect契約](https://developers.facebook.com/documentation/instagram-platform/reference/oauth-authorize)
+Instagram Loginの現行callback/redirect契約はG-IGでcanonical公式本文とMeta App Dashboardを確認する。**固定HTTPS callback、loopback、relayのいずれも確認前に必須構成として採用しない。** 確認結果がローカルcallbackだけで完結できるならrelayを作らない。固定HTTPS callbackが必要な場合に限り、本人管理の最小限の一回限りcode relayを選択肢とする。
 
-relayは認証時だけ使い、queue/token/投稿/analyticsを扱わない。CLIが認証済みのrelay管理APIへflowを登録し、高entropy stateと別の取得secretを設定する。callbackは登録stateへのcodeを短期memory保存し、CLIがTLS経由で取得secretをAuthorization headerに載せて一回だけ取得する。stateだけではcodeを読めない。取得後・timeoutで消去する。保存期限は最大2分かつprovider code期限以内。CLI自身もstateを照合する。
+relayが必要になった場合も認証時だけ使い、queue/token/投稿/analyticsを扱わない。CLIが認証済みのrelay管理APIへflowを登録し、高entropy stateと別の取得secretを設定する。callbackは登録stateへのcodeを短期memory保存し、CLIがTLS経由で取得secretをAuthorization headerに載せて一回だけ取得する。stateだけではcodeを読めない。取得後・timeoutで消去する。保存期限はprovider code期限より短くする。
 
 relay管理credentialはvaultに置く。作成APIの認証、rate limit、固定callback、payload上限、アクセスlogのquery除去、cache禁止が必要。任意URLへcodeを転送するopen redirectやSNS tokenの代理交換は実装しない。relay運営者はcodeを見られる信頼境界となるため、第三者の無料relayを暗黙採用しない。
 
-この小さな外部要素とimage stagingはInstagram対応の運用コストである。ローカルだけで常に全機能が成立すると説明しない。安全なcallback契約が確認できなければInstagram loginはrelease blockedにする。X/YouTubeだけの利用にrelayを要求しない。
+image/media stagingも同様に、確認済みInstagram upload契約で必要な場合だけ導入する。ローカルだけで常に全機能が成立すると説明せず、逆に未確認の外部インフラを先行して必須化もしない。安全なcallback契約を確認できなければInstagram loginはrelease blockedにする。X/YouTubeだけの利用にrelayを要求しない。
 
 ## Token refresh race
 
@@ -65,7 +65,7 @@ refresh responseを暗号化し、token blob・expiresAt・generationを1 transa
 
 providerがtokenをrotateした直後、DB保存前にcrashすると新tokenを失う。この分散transactionは解消できない。古いtokenの無限refreshをせず、providerの回復契約がない場合はReauthRequiredへ移す。worker復旧で公開操作を繰り返して解決しない。
 
-refreshはexpiry前の余裕時間とjitterを持ち、再起動後も期限を再確認する。IGは更新可能なtoken年齢を満たしてから更新する。401はgrant状態を再読込し、安全なreadを再試行できるが、公開の成否確認を飛ばす理由にはならない。
+refreshはexpiry前の余裕時間とjitterを持ち、再起動後も期限を再確認する。renewable access token型のproviderでは、**公式に確認した更新可能時期だけ**をAdapterが使う。401はgrant状態を再読込し、安全なreadを再試行できるが、公開の成否確認を飛ばす理由にはならない。
 
 ## File / process / staging
 
@@ -75,7 +75,7 @@ ffprobe等を採用する場合は固定実行fileをProcessStartInfo.ArgumentLi
 
 mimeは拡張子だけで決めずmagicとprobeの整合を取る。global spool予算とprovider/accountの動的size/duration/codec上限を両方確認する。巨大fileは全メモリに載せずstreamする。素材hashでTOCTOUを検出し、upload直前にもspoolの同一性を確かめる。
 
-IG image等の公開URLが必要な場合だけ、本人設定のobject storageに推測困難なobject keyでstagingする。短期read URLはprovider取得・再試行期間を満たすTTLとし、成功確認・期限到来後に削除する。bucket一覧・書込は公開しない。URLをsecretとして扱い、queryをlogしない。TikTokのverified domain条件を署名URLで回避したことにはしない。
+IG image等で公開URLが必要だと公式契約で確認できた場合だけ、本人設定のobject storageに推測困難なobject keyでstagingする。短期read URLはprovider取得・再試行期間を満たすTTLとし、成功確認・期限到来後に削除する。bucket一覧・書込は公開しない。URLをsecretとして扱い、queryをlogしない。TikTokのverified domain条件を署名URLで回避したことにはしない。
 
 MVPは任意外部URLのimportを提供しない。APIが返すupload URLはhttps、確認済みprovider host/path契約、redirect方針をAdapterで検査する。DNS/private IPへの遷移、credential付redirectは拒否する。固定host一覧の変更はversioned Adapter修正とする。認証headerを別hostへ自動転送しない。
 
