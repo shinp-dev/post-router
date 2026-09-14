@@ -50,15 +50,15 @@
 
 ## Phase 4 — Instagram
 
-理由: account条件、callback、画像URL、媒体別insightsが追加される。先行Phaseのqueue/ID回復を流用し、独立した外部条件を解消してから実装する。
+理由: account条件、callback、媒体upload、媒体別insightsが追加される。先行Phaseのqueue/ID回復を流用し、独立した外部条件を解消してから実装する。
 
-**Phase開始gate:** G-IGの公式本文を確認し、正確なGraph version、login別scope、callback、JPEG/Reels上限、TTL、local resumable/recovery、rate limit、metrics、商用開示・保持条件を調査書へ追記する。未確認の旧数値を仮実装してreleaseしない。
+**Phase開始gate:** G-IGのcanonical公式本文とMeta App Dashboardを確認し、正確なGraph version、login別scope、callback/redirect方式、token更新、JPEG/Reels上限、container TTL、local/resumableまたはURL uploadの契約、`media_publish`曖昧結果の照合/final Media ID復旧、rate limit、metrics、delete、商用開示・保持条件を調査書へ追記する。未確認の旧数値・旧flowを仮実装してreleaseしない。
 
-内容: Instagram Login、HTTPS callback、long-lived token更新、JPEG単体/Reels、staging、container→publish、local schedule、確認済みInsights。Facebook LoginやPersonal対応を同時に追加しない。
+内容: 確認済みInstagram Login flow、確認済みcallback/redirect方式、確認済みtoken更新、JPEG単体/Reels、必要な場合だけmedia staging、container→publish、local schedule、確認済みInsights。Facebook LoginやPersonal対応を同時に追加しない。固定HTTPS relayやobject storageを公式条件確認前にPhase 4の必須構成として先行実装しない。
 
-人間の準備: Professional Business/Creator account、Meta appとrole/access、本人管理の固定HTTPS callback、必要なimage staging bucketと予算、必要に応じApp Review。秘密は本人vault。
+人間の準備: Professional Business/Creator account、Meta appとrole/access。callback、公開domain、media staging、App Reviewの要否はG-IGの確認結果に従って準備する。秘密は本人vault。
 
-合格条件: G-IG/G-RETが閉じたcapabilityだけ有効、container PUBLISHEDでID喪失時に再投稿なし、staging cleanup、token renewalと再認証、Windows taskからの動作。carousel/Stories、商用開示未確認形式、DELETEは別gateの後続機能。
+合格条件: G-IG/G-RETが閉じたcapabilityだけ有効。`media_publish` response喪失時は確認済みのoperation-bound証拠で安全に照合できる場合だけ回復し、そうでなければUnknown/NeedsAttentionのまま自動再投稿・新container作成をしない。必要なstaging cleanup、token renewal/再認証、Windows taskからの動作を確認する。carousel/Stories、商用開示未確認形式、DELETEは各gate確認後の機能とする。
 
 ## Phase 5 — TikTokの限定的対応判断
 
