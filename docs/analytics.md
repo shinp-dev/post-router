@@ -46,7 +46,7 @@ YouTube API dataによる独自派生metricsには規約上の制約があるた
 
 ## 収集jobと遅延
 
-公開確認後に初期policyとして1時間、6時間、24時間、3日、7日、28日を予約する。これは製品側defaultであり、SNSがその時刻に全指標を返す保証ではない。API予算・rate limit・媒体の取得可能期間で調整する。即時stats syncは同じcollector jobをenqueueし、外部API料金と対象範囲をplanで示す。
+データ構造は同一Publicationについて1h / 24h / 7d等の複数snapshotを保存できるようにするが、**MVP既定で多数の自動収集周期を予約しない**。Phase 1はFake Provider上で複数snapshotをテストし、実Providerでは `stats sync` による明示収集を基本とする。自動収集を有効化する場合はProvider Phaseでquota・料金・取得可能window・retentionを確認し、ユーザーが選べる小さなcadenceとして追加する。外部API料金と対象範囲はplan/doctorで示す。
 
 YouTube Analyticsの期間reportは日付・timezone・dimensionの公式組合せでqueryする。データが確定している終了日を保存し、要求終了日まで得られたと偽らない。直近日を後日再取得して別snapshotを作り、latest projectionを選ぶ。データ遅延中のData API lifetime countとAnalytics日次値を同じ表の同じ期間として混ぜない。
 
