@@ -27,6 +27,8 @@ AuthPortはInfrastructureのvaultを直接使わず、ApplicationのAuthCoordina
 
 制約はMediaConstraint（MIME、サイズ、時間、解像度、個数）、ScheduleConstraint（native可否、必要lead time、取消範囲）、OperationalConstraint（PC稼働、asset hosting、明示UI同意）、MetricDescriptorで表現する。API field名はここへ漏らさない。
 
+曖昧結果の回復能力も `reconcile.publish` 等のcapability keyとして公開する。値は単純な「reconcileあり/なし」ではなく、少なくとも「operationに結び付くhandle/remote IDで確認可能」「条件付き」「照合不能になり得る」をreason/constraints/evidenceで説明する。PublicationPort自体は全adapterで `reconcile` を実装してよく、能力が弱いproviderはInconclusiveを返す。timeline類似検索を強いreconciliation能力と表現しない。
+
 Capabilitiesのキャッシュは助言であり認可証明ではない。enqueue時と危険な実行直前に再検証する。新制約で不適合ならNeedsAttention、勝手な本文・visibility変更は禁止。
 
 ## 実行stepとdurable checkpoint
@@ -60,7 +62,7 @@ ReconcileResultはFound（証拠付きIDと状態）/ ConfirmedAbsent（対象op
 | Instagram | staging/rupload→container ID保存→status→media_publish→公開確認 | media_publish。container作成は公開成功ではない |
 | TikTok（将来条件付き） | creator/consent→initでpublish_id保存→transfer→status | FILE_UPLOAD最終chunk、またはPULL_FROM_URL initが公開を開始し得る |
 
-TikTokを「uploadは常に副作用なし」と扱わない。YouTube native予約とlocal公開を並走させない。InstagramでcontainerがPUBLISHEDだがfinal media ID未回収なら再publishせず、公開済みの証拠を保持してID照合を続ける。
+TikTokを「uploadは常に副作用なし」と扱わない。YouTube native予約とlocal公開を並走させない。Instagramのmedia_publish後にresponseを失った場合、container statusやfinal Media IDの安全な復旧能力はG-IGで確認するまでUnknownとして扱う。確認済みのoperation-bound証拠なしに再publish・新container作成をしない。
 
 ## エラー分類
 
