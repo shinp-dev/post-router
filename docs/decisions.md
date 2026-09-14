@@ -53,12 +53,12 @@ capabilityはruntimeの権限とpolicyも含む。新SNSのためだけに既存
 
 XとYouTubeはsystem browser＋loopback。TikTok Desktopもloopbackが公式に存在するため、HTTPSサーバー必須と決めつけない。ただし独自PKCEエンコードやclient secretの扱いはTikTok adapterに隔離する。
 
-Instagramは認証専用の固定HTTPS callbackを使う設計を選ぶ。トークン交換はローカルで行い、callbackは一回のcodeを安全に引き渡すだけ。公共callbackの追加運用はInstagram有効化時だけ。詳細は[security](security.md)。CLI向けloopback例外が対象appで公式に確認できた場合のみADRを更新して簡略化する。
+Instagramは現行Instagram Loginのcallback/redirect契約をG-IGでcanonical公式本文とMeta App Dashboardから確認してから方式を選ぶ。確認前に固定HTTPS relayやloopbackを採用済み扱いしない。ローカルcallbackで成立するなら追加serverを持たず、固定HTTPS callbackが必要な場合だけ認証専用の最小code relayを検討する。[security](security.md)
 
 ## ADR-007: Normalizedは表現の統一に限定
 
 同じ名前の指標を同じ意味とみなさない。特にYouTubeは派生指標制限があるため、MVPの共通層はprovider値のalias、型、表示単位のメタデータに限定する。独自のengagement score、views当たりlike率、媒体横断合計は作らない。[Analytics](analytics.md)
 
-## ADR-008: Instagram画像の配信元
+## ADR-008: Instagram media staging
 
-APIが取得できるHTTPS画像URLを必要とする経路に備え、MediaStaging portを設ける。単一のS3互換実装をInstagram Phaseで用意し、bucket全体公開はせず期限付きGETを利用する。動画は公式のresumable local uploadを第一候補にする。URLの必要性を全providerへ強制しない。未確認のendpoint契約はG-IG gateを通す。
+Instagramの画像/動画upload契約はG-IGで確定する。APIがprovider取得可能なHTTPS media URLを要求する経路だけMediaStaging portを有効化し、local/resumable uploadが公式に利用できる形式には不要なstagingを挟まない。URL方式が必要なら単一の最小実装をInstagram Phaseで用意し、bucket全体公開を避け、確認済みTTLに従う。未確認のS3互換実装・公開domain・resumable方式をPhase 1から先行実装しない。
