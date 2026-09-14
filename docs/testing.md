@@ -36,12 +36,13 @@ xUnit、.NET TimeProvider、ASP.NET Core/Kestrelのloopback fake serverを採用
 | native scheduled + restart | publishAt受理後 | local公開jobを生成しない |
 | native response lost | 予約設定のresponse切断 | 同一video IDで照会、local fallbackなし |
 | expired upload handle | X/IG/YT個別 | expiryを不存在の証明にしない |
-| IG PUBLISHED/no final ID | media_publish応答喪失 | 新container作成・再publishなし |
+| IG media_publish response lost | 公開request後にresponse切断 | G-IGで確認した強い照合証拠がなければUnknown/NeedsAttention。新container作成・再publishなし |
 | TikTok final chunk | upload最終chunk後切断 | 将来adapterでもMayPublish/Unknownとして扱う |
 | TikTok policy gate | 本プロジェクトprofile | 公開init/transferへのHTTPが0回 |
 | cancelled while dispatching | cancelと公開step競合 | 成否を照合、取消成功の誤表示なし |
 | timezone / DST / clock jump | gap/fold/前後補正 | 不正時刻拒否、二重dueなし、late policy適用 |
 | PC restart / overdue | deadline内/外・ログオン前後 | 内は再開、未送信で外はExpired。受理済みnativeを取消しない |
+| retry expired | Expired publicationにCLI retry | remote HTTP 0回。新しい希望時刻・新しいkeyのPostを要求 |
 | old backup restore | receipt欠落 | 全送信quarantine。旧Pending自動再送0回 |
 | malformed metric / unknown enum | data type・必須field変更 | raw隔離、誤った0や共通指標生成なし |
 | retention deadline offline | 停止後に再起動 | data利用前に期限処理、backup/exportにも削除 |
