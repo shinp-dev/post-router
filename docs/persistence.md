@@ -39,9 +39,9 @@ Linux XDG、macOS Application Supportのmappingは将来Infrastructureへ追加�
 | post_revisions | post_id、revision、content_id、intent_json、created_at、PK(post_id,revision) |
 | contents / media_assets | 本文/title/形式、hash、mime、size、duration、private storage_ref、reference count |
 | targets | id、post_id、revision、account_id、options_schema/version/json、visibility、unique(post_id,revision,account_id) |
-| schedules | id、mode、due_at_utc、original_local、zone_id、offset、tzdata_version、max_lateness |
+| schedules | id、mode、due_at_utc、original_local、zone_id、offset、tzdata_version、max_lateness、consent_at |
 | publications | id、target_id unique、schedule_id、state、execution_mode、timestamps、safe_error_json、generation |
-| remote_objects | id、publication_id、kind、provider_object_id、parent_id、observed_state、timestamps |
+| remote_objects | id、publication_id、account_id、kind、provider_object_id、parent_id、observed_state、timestamps、unique(account_id,kind,provider_object_id) |
 | jobs | id、publication_id/grant_id、kind、step_key、state、due_at、resume_state、generation、attempt_count |
 | attempts | id、job_id、step_key、dispatch_state、request_digest、effect_certainty、receipt_ref、safe_error、timestamps |
 | provider_checkpoints | publication_id、adapter_key、schema_version、vault_blob_id、updated_at |
@@ -49,7 +49,7 @@ Linux XDG、macOS Application Supportのmappingは将来Infrastructureへ追加�
 | capability_snapshots | account_id、adapter_version、checked_at、expires_at、safe_payload |
 | raw_metric_responses | id、provider/api_version、request_descriptor、subject、retrieved_at、vault_blob_id、payload_hash、retention_class、expires_at |
 | stats_sync_runs | id、scope_json、state、requested_at、finished_at、safe_error |
-| metrics_snapshots | id、account_id、subject_ref、period_start/end、provider_timezone、dimensions_json、completeness、mapping_version、created_at |
+| metrics_snapshots | id、account_id、subject_ref、provider、api_version、retrieved_at、period_start/end、provider_timezone、dimensions_json、completeness、mapping_version、created_at |
 | snapshot_raw_links | snapshot_id、raw_id、page/query role |
 | metric_observations | snapshot_id、provider_key、canonical_key、definition_version、value_decimal/text、unit、value_status、dimensions_json |
 | policy_checks | grant/account、policy_version、authorization_checked_at、subject_existence_checked_at、next_check_at |
@@ -57,9 +57,11 @@ Linux XDG、macOS Application Supportのmappingは将来Infrastructureへ追加�
 | audit_events | event_id、local IDs、safe actor/action、timestamp、safe details |
 | schema_migrations | version、name、checksum、applied_at、app_version |
 
-remote_objectsの識別はprovider＋account＋kind＋opaque ID。upload IDとmedia IDが同じ文字列でも別扱いする。1:nの返却を表現し、joinで曖昧な帰属を作らない。receipt/checkpointの機密部分はvault blob、非機密のremote IDは通常columnとする。
+remote_objectsのproviderは`account_id -> accounts.provider`で決まり、identityはaccount＋kind＋opaque IDでDB上も一意にする。`remote_objects.account_id` はPublication→Targetのaccountと一致することをApplicationが挿入時に検証し、別accountのremote IDをattachしない。upload IDとmedia IDが同じ文字列でもkindが違えば別扱いする。1:nの返却を表現し、joinで曖昧な帰属を作らない。receipt/checkpointの機密部分はvault blob、非機密のremote IDは通常columnとする。
 
-必須indexはjobs(state,due_at)、publications(state)、targets(post_id)、remote object identity、raw(expires_at)、snapshot(subject,period,retrieved_at)、observation(provider_key)。大きな時系列を全件読んでstats showしない。doubleでcountを丸めず、巨大countはdecimal文字列対応のCLI schemaとする。
+MetricsSnapshotはDomain契約どおりprovider / api_version / retrieved_atを直接保持する。複数Raw responseを1 snapshotへlinkしても、どのProvider/API世代・取得時点のprojectionかをjoin推測だけに依存させない。`created_at` はprojection行の作成時刻であり、remote取得時刻の代用にしない。
+
+必須indexはjobs(state,due_at)、publications(state)、targets(post_id)、remote_objects(account_id,kind,provider_object_id) unique、raw(expires_at)、snapshot(subject,period,retrieved_at)、observation(provider_key)。大きな時系列を全件読んでstats showしない。doubleでcountを丸めず、巨大countはdecimal文字列対応のCLI schemaとする。
 
 unique client_request_idとintent_hash照合を同一transactionで実行する。hash衝突だけをidentityにせず、canonical intentも比較可能にする。publish jobの重複active登録を防ぐ部分unique indexとgeneration CASを使う。成功済みPublicationにpublish jobを作れない不変条件もApplicationで検証する。
 
