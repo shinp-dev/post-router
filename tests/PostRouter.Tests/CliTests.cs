@@ -68,12 +68,12 @@ public sealed class CliTests
         Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", Convert.ToBase64String(key));
         try
         {
-            await using (var runtime = await RuntimeFactory.CreateAsync(directory, new InMemoryMasterKeyStore(key)))
+            await using (var setupRuntime = await RuntimeFactory.CreateAsync(directory, new InMemoryMasterKeyStore(key)))
             {
                 var expires = DateTimeOffset.UtcNow.AddHours(2);
                 var material = JsonSerializer.SerializeToUtf8Bytes(new TokenMaterial("access", "refresh", expires));
-                var blob = await runtime.Store.PutAsync("auth-token", material);
-                _ = await runtime.Store.SaveConnectedAccountAsync(new(
+                var blob = await setupRuntime.Store.PutAsync("auth-token", material);
+                _ = await setupRuntime.Store.SaveConnectedAccountAsync(new(
                     "youtube", "yt-main", "channel-1", "YT Main", "desktop-client",
                     "https://www.googleapis.com/auth/youtube.force-ssl", expires, blob));
             }
