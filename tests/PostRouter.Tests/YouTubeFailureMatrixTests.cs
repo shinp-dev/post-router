@@ -25,7 +25,8 @@ public sealed class YouTubeFailureMatrixTests
                 response.Headers.Location = Session("processing-session");
                 return Task.FromResult(response);
             }
-            if (IsUpload(request, "processing-session"))
+            if (IsStatusQuery(request, "processing-session")) return Task.FromResult(ResumeIncomplete());
+            if (IsDataUpload(request, "processing-session"))
                 return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-processing\"}"));
             if (request.Method == HttpMethod.Get)
             {
@@ -46,11 +47,68 @@ public sealed class YouTubeFailureMatrixTests
             Assert.Equal(1, await setup.Worker.RunOnceAsync());
             var queue = Assert.Single(await setup.Posts.QueueAsync());
             Assert.Equal(0, queue.AttemptNo);
+            context.Time.Advance(TimeSpan.FromSeconds(31));
         }
 
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(13, polls);
+        Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Abandoned_upload_claim_queries_remote_offset_before_resending_data()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var media = await VideoAsync(context, "crash-resume.mp4");
+        var statusQueries = 0;
+        var dataUploads = 0;
+        using var http = Client((request, _, _) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                var response = Json(HttpStatusCode.OK, "{}");
+                response.Headers.Location = Session("crash-session");
+                return Task.FromResult(response);
+            }
+            if (IsStatusQuery(request, "crash-session"))
+            {
+                Interlocked.Increment(ref statusQueries);
+                return Task.FromResult(ResumeIncomplete(1));
+            }
+            if (IsDataUpload(request, "crash-session"))
+            {
+                Interlocked.Increment(ref dataUploads);
+                Assert.Equal("bytes 2-5/6", request.Content?.Headers.ContentRange?.ToString());
+                return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-crash-resume\"}"));
+            }
+            if (request.Method == HttpMethod.Get)
+                return Task.FromResult(Processed("video-crash-resume", "private"));
+            return Task.FromResult(Published("video-crash-resume"));
+        });
+        var setup = await BuildAsync(context, http);
+        var queued = await setup.Posts.EnqueueAsync(Intent(context, setup.Account.AccountId, "youtube-crash-resume", media.Path, media.Bytes));
+
+        // Persist the upload session first.
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+
+        // Simulate a process dying after the resumable upload dispatch was durably prepared but
+        // before any receipt/checkpoint could be committed.
+        var abandonedRun = await setup.Store.StartWorkerRunAsync(context.Time.GetUtcNow());
+        var item = Assert.Single(await setup.Store.ClaimDueAsync(abandonedRun, context.Time.GetUtcNow(), 1));
+        var step = await setup.Adapter.PlanNextStepAsync(item.Input, item.Checkpoint, default);
+        Assert.Equal("youtube.safe-resume-upload.v1", step.StepKey);
+        Assert.Equal(ReplaySafety.ResumeKnownHandle, step.ReplaySafety);
+        Assert.NotNull(await setup.Store.PrepareDispatchAsync(item, step, context.Time.GetUtcNow()));
+        await setup.Store.StopWorkerRunAsync(abandonedRun, context.Time.GetUtcNow());
+
+        // Recovery must query the server-owned offset before sending bytes again.
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, statusQueries);
+        Assert.Equal(1, dataUploads);
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
         await setup.Worker.DisposeAsync();
     }
@@ -62,6 +120,7 @@ public sealed class YouTubeFailureMatrixTests
         var media = await VideoAsync(context, "expired.mp4");
         var starts = 0;
         var uploads = 0;
+        var statusQueries = 0;
         var publishes = 0;
         using var http = Client((request, _, _) =>
         {
@@ -72,12 +131,17 @@ public sealed class YouTubeFailureMatrixTests
                 response.Headers.Location = Session(start == 1 ? "expired-session" : "replacement-session");
                 return Task.FromResult(response);
             }
-            if (IsUpload(request, "expired-session"))
+            if (IsStatusQuery(request, "expired-session"))
             {
-                Interlocked.Increment(ref uploads);
+                Interlocked.Increment(ref statusQueries);
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             }
-            if (IsUpload(request, "replacement-session"))
+            if (IsStatusQuery(request, "replacement-session"))
+            {
+                Interlocked.Increment(ref statusQueries);
+                return Task.FromResult(ResumeIncomplete());
+            }
+            if (IsDataUpload(request, "replacement-session"))
             {
                 Interlocked.Increment(ref uploads);
                 return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-after-expiry\"}"));
@@ -100,7 +164,8 @@ public sealed class YouTubeFailureMatrixTests
         Assert.Equal(PublicationState.Published, Assert.Single(saved!.Publications).State);
         Assert.Equal("video-after-expiry", Assert.Single(saved.RemoteObjects).ProviderObjectId);
         Assert.Equal(2, starts);
-        Assert.Equal(2, uploads);
+        Assert.Equal(2, statusQueries);
+        Assert.Equal(1, uploads);
         Assert.Equal(1, publishes);
         await setup.Worker.DisposeAsync();
     }
@@ -122,7 +187,8 @@ public sealed class YouTubeFailureMatrixTests
                 response.Headers.Location = Session("processing-failed-session");
                 return Task.FromResult(response);
             }
-            if (IsUpload(request, "processing-failed-session"))
+            if (IsStatusQuery(request, "processing-failed-session")) return Task.FromResult(ResumeIncomplete());
+            if (IsDataUpload(request, "processing-failed-session"))
             {
                 Interlocked.Increment(ref uploads);
                 return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-processing-failed\"}"));
@@ -167,7 +233,8 @@ public sealed class YouTubeFailureMatrixTests
                 response.Headers.Location = Session("rate-limit-session");
                 return Task.FromResult(response);
             }
-            if (IsUpload(request, "rate-limit-session"))
+            if (IsStatusQuery(request, "rate-limit-session")) return Task.FromResult(ResumeIncomplete());
+            if (IsDataUpload(request, "rate-limit-session"))
             {
                 Interlocked.Increment(ref uploads);
                 return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-rate-limit\"}"));
@@ -219,6 +286,7 @@ public sealed class YouTubeFailureMatrixTests
                 response.Headers.Location = Session("malformed-success-session");
                 return Task.FromResult(response);
             }
+            if (IsStatusQuery(request, "malformed-success-session")) return Task.FromResult(ResumeIncomplete());
             return Task.FromResult(Json(HttpStatusCode.OK, "{}"));
         });
         var setup = await BuildAsync(context, http);
@@ -231,8 +299,21 @@ public sealed class YouTubeFailureMatrixTests
         var publication = Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications);
         Assert.Equal(PublicationState.Failed, publication.State);
         Assert.Equal("youtube_upload_success_malformed", publication.SafeError);
-        Assert.Equal(2, calls);
+        Assert.Equal(3, calls);
         await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public void Consent_auth_wrapper_requests_consent_without_exposing_verifier()
+    {
+        using var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1/") };
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var provider = new YouTubeConsentAuthProvider(new YouTubeAuthProvider(new YouTubeApiClient(http, time), time));
+        var session = provider.BeginAuthorization("desktop-client", new Uri("http://127.0.0.1:9876/callback"));
+
+        Assert.Contains("prompt=consent", session.AuthorizationUri.Query, StringComparison.Ordinal);
+        Assert.Contains("access_type=offline", session.AuthorizationUri.Query, StringComparison.Ordinal);
+        Assert.DoesNotContain(session.CodeVerifier, session.AuthorizationUri.AbsoluteUri, StringComparison.Ordinal);
     }
 
     private static async Task<YouTubeSetup> BuildAsync(TestContext context, HttpClient http)
@@ -242,14 +323,14 @@ public sealed class YouTubeFailureMatrixTests
         var auth = new AuthCoordinator(context.Store, context.Store,
             new FileAuthGrantLockFactory(Path.Combine(context.Directory, "youtube-matrix-auth-locks")), context.Gate, [authProvider], context.Time);
         var account = await SaveConnectionAsync(context);
-        var adapter = new YouTubeProviderAdapter(auth, client, context.Time);
+        IProviderAdapter adapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(auth, client, context.Time));
         var registry = new ProviderRegistry([adapter]);
         var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time, context.Database);
         var posts = new PostService(applicationStore, context.Gate, registry, context.Time);
         var worker = new WorkerService(applicationStore, registry,
             new FileWorkerLockFactory(Path.Combine(context.Directory, "youtube-matrix-worker.lock")), context.Gate, context.Time,
             accountOperationLocks: new NoOpAccountOperationLockFactory());
-        return new(account, posts, worker);
+        return new(account, posts, worker, adapter, applicationStore);
     }
 
     private static async Task<AccountConnection> SaveConnectionAsync(TestContext context)
@@ -279,8 +360,21 @@ public sealed class YouTubeFailureMatrixTests
     }
 
     private static Uri Session(string id) => new($"https://www.googleapis.com/upload/youtube/v3/videos?upload_id={id}");
-    private static bool IsUpload(HttpRequestMessage request, string session) =>
-        request.Method == HttpMethod.Put && request.RequestUri?.Query.Contains(session, StringComparison.Ordinal) == true;
+
+    private static bool IsStatusQuery(HttpRequestMessage request, string session) =>
+        request.Method == HttpMethod.Put && request.RequestUri?.Query.Contains(session, StringComparison.Ordinal) == true &&
+        request.Content?.Headers.ContentLength == 0;
+
+    private static bool IsDataUpload(HttpRequestMessage request, string session) =>
+        request.Method == HttpMethod.Put && request.RequestUri?.Query.Contains(session, StringComparison.Ordinal) == true &&
+        request.Content?.Headers.ContentLength > 0;
+
+    private static HttpResponseMessage ResumeIncomplete(long? lastByte = null)
+    {
+        var response = new HttpResponseMessage((HttpStatusCode)308);
+        if (lastByte is not null) response.Headers.TryAddWithoutValidation("Range", $"bytes=0-{lastByte.Value}");
+        return response;
+    }
 
     private static HttpResponseMessage Processing(string id) => Json(HttpStatusCode.OK,
         $"{{\"items\":[{{\"id\":\"{id}\",\"status\":{{\"uploadStatus\":\"uploaded\",\"privacyStatus\":\"private\"}},\"processingDetails\":{{\"processingStatus\":\"processing\"}}}}]}}");
@@ -306,5 +400,10 @@ public sealed class YouTubeFailureMatrixTests
             response(request, Interlocked.Increment(ref _calls), cancellationToken);
     }
 
-    private sealed record YouTubeSetup(AccountConnection Account, PostService Posts, WorkerService Worker);
+    private sealed record YouTubeSetup(
+        AccountConnection Account,
+        PostService Posts,
+        WorkerService Worker,
+        IProviderAdapter Adapter,
+        IPostRouterStore Store);
 }
