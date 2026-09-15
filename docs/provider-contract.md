@@ -17,6 +17,8 @@
 | DeletePort | remote削除の計画と結果確認。公開取消と別 |
 | AuthPort | login request、code exchange、refresh、revoke、grant検査 |
 
+Phase 2Aの実装では、Adapterの共通面に`RequiresConnectedAccount`と副作用のない`Validate(Content, Target)`を追加した。Applicationはenqueue時にこれを呼び、workerはaccount単位のprocess間lock取得後、dispatch記録直前にも接続状態をDBで再確認する。OAuth endpoint・scope・token DTOはこの共通面へ追加せず、interactive auth portとX Infrastructure内部に隔離する。
+
 AuthPortはInfrastructureのvaultを直接使わず、ApplicationのAuthCoordinatorが秘密materialを短時間渡し、返されたsecret更新をcommitする。secret型はToString/serialize不可を原則とする。
 
 ## Capabilities

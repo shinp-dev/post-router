@@ -32,6 +32,11 @@ public sealed record AuthorizationSession(
     string? Alias = null);
 public sealed record ConnectedIdentity(string RemoteSubject, string DisplayName, string Scope, TokenMaterial Material);
 public sealed record AccountRevokeResult(Guid AccountId, bool RemoteRevoked, bool LocalDisconnected, string? SafeError);
+public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
+{
+    public string SafeCode { get; } = safeCode;
+    public bool Retryable { get; } = retryable;
+}
 public sealed record DoctorCheck(string Name, bool Healthy, string Code, string Message);
 public sealed record BackupResult(string Path, string Sha256, DateTimeOffset CreatedAt);
 public sealed record RestorePublication(Guid PublicationId, PublicationState State, string Risk, bool HasRemoteObject);

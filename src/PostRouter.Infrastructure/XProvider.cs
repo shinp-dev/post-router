@@ -10,13 +10,9 @@ using PostRouter.Domain;
 
 namespace PostRouter.Infrastructure;
 
-public sealed class XProviderException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
-{
-    public string SafeCode { get; } = safeCode;
-    public bool Retryable { get; } = retryable;
-}
+internal sealed class XProviderException(string safeCode, bool retryable, Exception? inner = null) : ProviderOperationException(safeCode, retryable, inner);
 
-public sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvider)
+internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvider)
 {
     private const int MaxResponseBytes = 1024 * 1024;
     private static readonly Uri ProductionBaseUri = new("https://api.x.com/");
@@ -188,21 +184,21 @@ public sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvider)
     private sealed record XUserEnvelope([property: JsonPropertyName("data")] XUser? Data);
 }
 
-public sealed record XTokenResponse(
+internal sealed record XTokenResponse(
     [property: JsonPropertyName("token_type")] string? TokenType,
     [property: JsonPropertyName("expires_in")] int ExpiresIn,
     [property: JsonPropertyName("access_token")] string AccessToken,
     [property: JsonPropertyName("scope")] string? Scope,
     [property: JsonPropertyName("refresh_token")] string? RefreshToken);
 
-public sealed record XUser(
+internal sealed record XUser(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("name")] string? Name,
     [property: JsonPropertyName("username")] string? Username);
 
-public sealed record XCreatePostResult(bool Success, string? PostId, string? SafeError, DateTimeOffset? RetryAt, bool Ambiguous);
+internal sealed record XCreatePostResult(bool Success, string? PostId, string? SafeError, DateTimeOffset? RetryAt, bool Ambiguous);
 
-public sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) : IInteractiveAuthProvider
+internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) : IInteractiveAuthProvider
 {
     public const string RequiredScope = "tweet.read tweet.write users.read offline.access";
     public string ProviderKey => "x";
@@ -276,7 +272,7 @@ public sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) 
     }
 }
 
-public sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, TimeProvider timeProvider) : IProviderAdapter
+internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, TimeProvider timeProvider) : IProviderAdapter
 {
     public string ProviderKey => "x";
     public bool RequiresConnectedAccount => true;

@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PostRouter.Application;
 using PostRouter.Infrastructure;
 
 namespace PostRouter.Cli;
@@ -340,7 +341,7 @@ public static class CliApplication
         return command;
     }
 
-    private static async Task<(string Code, string State)> ReceiveOAuthCallbackAsync(PostRouter.Application.AuthorizationSession session, CancellationToken cancellationToken)
+    private static async Task<(string Code, string State)> ReceiveOAuthCallbackAsync(AuthorizationSession session, CancellationToken cancellationToken)
     {
         var address = string.Equals(session.RedirectUri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
             ? IPAddress.Loopback
@@ -412,7 +413,7 @@ public static class CliApplication
         catch (System.Security.Cryptography.CryptographicException) { WriteError("credential_unavailable", "Protected data could not be read."); return 7; }
         catch (IOException) { WriteError("io_error", "A required local file operation failed."); return 7; }
         catch (JsonException) { WriteError("invalid_json", "A JSON document is malformed or incompatible."); return 2; }
-        catch (XProviderException ex) { WriteError("provider_error", ex.SafeCode); return ex.Retryable ? 7 : 2; }
+        catch (ProviderOperationException ex) { WriteError("provider_error", ex.SafeCode); return ex.Retryable ? 7 : 2; }
         catch (Exception ex) { WriteError("internal_error", ex.GetType().Name); return 1; }
     }
 
