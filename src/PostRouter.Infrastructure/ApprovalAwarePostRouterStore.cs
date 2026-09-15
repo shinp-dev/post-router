@@ -6,7 +6,8 @@ namespace PostRouter.Infrastructure;
 public sealed class ApprovalAwarePostRouterStore(
     IPostRouterStore inner,
     IPublicationApprovalStore approvals,
-    TimeProvider timeProvider) : IPostRouterStore
+    TimeProvider timeProvider,
+    SqliteDatabase database) : IPostRouterStore
 {
     public Task InitializeAsync(CancellationToken cancellationToken = default) => inner.InitializeAsync(cancellationToken);
     public Task<EnqueueResult> EnqueueAsync(CanonicalPostIntent intent, byte[] canonicalBytes, string hash, CancellationToken cancellationToken = default) => inner.EnqueueAsync(intent, canonicalBytes, hash, cancellationToken);
@@ -38,7 +39,30 @@ public sealed class ApprovalAwarePostRouterStore(
         return await inner.PrepareDispatchAsync(item, providerStep, now, cancellationToken).ConfigureAwait(false);
     }
 
-    public Task CommitResultAsync(PublicationWorkItem item, Attempt attempt, StepResult result, DateTimeOffset now, CancellationToken cancellationToken = default) => inner.CommitResultAsync(item, attempt, result, now, cancellationToken);
+    public async Task CommitResultAsync(PublicationWorkItem item, Attempt attempt, StepResult result, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        var commitItem = item;
+        if (result.Outcome == StepOutcome.Pending && !result.ConsumesRetryBudget)
+        {
+            if (result.EffectCertainty == EffectCertainty.Ambiguous)
+                throw new InvalidOperationException("Ambiguous progress cannot bypass the retry budget.");
+
+            await using var connection = await database.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction();
+            var changed = await SqliteDatabase.ExecuteCountAsync(connection, transaction,
+                "UPDATE jobs SET attempt_count=attempt_count-1 WHERE id=$id AND state='Claimed' AND attempt_count>0",
+                cancellationToken, ("$id", item.Job.Id.ToString("D"))).ConfigureAwait(false);
+            if (changed != 1) throw new InvalidOperationException("Progress retry-budget accounting lost the claimed job.");
+            transaction.Commit();
+
+            // SqliteStore evaluates the pending retry limit from the pre-dispatch work item.
+            // A non-consuming progress receipt must never trip that failure-only limit.
+            commitItem = item with { Job = item.Job with { AttemptNo = 0 } };
+        }
+
+        await inner.CommitResultAsync(commitItem, attempt, result, now, cancellationToken).ConfigureAwait(false);
+    }
+
     public Task<bool> IsStopRequestedAsync(CancellationToken cancellationToken = default) => inner.IsStopRequestedAsync(cancellationToken);
     public Task RequestStopAsync(CancellationToken cancellationToken = default) => inner.RequestStopAsync(cancellationToken);
     public Task ClearStopRequestAsync(CancellationToken cancellationToken = default) => inner.ClearStopRequestAsync(cancellationToken);
