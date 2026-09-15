@@ -7,7 +7,7 @@ public static class PublicationStateMachine
         {
             [PublicationState.Pending] = [PublicationState.Preparing, PublicationState.Ready, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.NeedsAttention],
             [PublicationState.Preparing] = [PublicationState.Ready, PublicationState.Processing, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
-            [PublicationState.Ready] = [PublicationState.Publishing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.NeedsAttention],
+            [PublicationState.Ready] = [PublicationState.Publishing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.Failed, PublicationState.NeedsAttention],
             [PublicationState.Publishing] = [PublicationState.Processing, PublicationState.Published, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.Processing] = [PublicationState.Published, PublicationState.Failed, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.ScheduledRemote] = [PublicationState.Published, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],

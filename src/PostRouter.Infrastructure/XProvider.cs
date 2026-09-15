@@ -70,30 +70,37 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
 
     public async Task<string> UploadImageAsync(string accessToken, XUploadAsset asset, CancellationToken cancellationToken)
     {
-        using var request = Authorized(HttpMethod.Post, Endpoint("2/media/upload"), accessToken);
-        using var form = new MultipartFormDataContent();
+        if (asset.SizeBytes is <= 0 or > 5L * 1024 * 1024)
+            throw new XProviderException("media_integrity_mismatch", false);
+        var bytes = new byte[checked((int)asset.SizeBytes)];
         await using var stream = new FileStream(asset.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length != asset.SizeBytes) throw new XProviderException("media_integrity_mismatch", false);
-        var actualHash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
-        if (!string.Equals(actualHash, asset.Sha256, StringComparison.Ordinal))
-            throw new XProviderException("media_integrity_mismatch", false);
-        stream.Position = 0;
-        using var media = new StreamContent(stream);
-        media.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
-        form.Add(media, "media", "image.jpg");
-        form.Add(new StringContent("tweet_image"), "media_category");
-        request.Content = form;
-        using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapSafeFailure(response.StatusCode, "x_media_upload_rejected");
-        var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
         {
-            var value = JsonSerializer.Deserialize<XMediaEnvelope>(bytes);
-            if (string.IsNullOrWhiteSpace(value?.Data?.Id)) throw new XProviderException("x_media_upload_malformed", false);
-            return value.Data.Id;
+            try { await stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false); }
+            catch (EndOfStreamException ex) { throw new XProviderException("media_integrity_mismatch", false, ex); }
+            if (stream.ReadByte() != -1 || !string.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), asset.Sha256, StringComparison.Ordinal))
+                throw new XProviderException("media_integrity_mismatch", false);
+            using var request = Authorized(HttpMethod.Post, Endpoint("2/media/upload"), accessToken);
+            using var form = new MultipartFormDataContent();
+            using var media = new ByteArrayContent(bytes);
+            media.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+            form.Add(media, "media", "image.jpg");
+            form.Add(new StringContent("tweet_image"), "media_category");
+            request.Content = form;
+            using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) throw MapSafeFailure(response.StatusCode, "x_media_upload_rejected");
+            var responseBytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var value = JsonSerializer.Deserialize<XMediaEnvelope>(responseBytes);
+                if (string.IsNullOrWhiteSpace(value?.Data?.Id)) throw new XProviderException("x_media_upload_malformed", false);
+                return value.Data.Id;
+            }
+            catch (JsonException ex) { throw new XProviderException("x_media_upload_malformed", false, ex); }
         }
-        catch (JsonException ex) { throw new XProviderException("x_media_upload_malformed", false, ex); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     public async Task<XCreatePostResult> CreateTextPostAsync(string accessToken, string text, IReadOnlyList<string>? mediaIds, CancellationToken cancellationToken)
