@@ -8,6 +8,9 @@
           "PostRouter.Domain": "[1.0.0, )"
         }
       },
+      "postrouter.domain": {
+        "type": "Project"
+      },
       "postrouter.infrastructure": {
         "type": "Project",
         "dependencies": {
