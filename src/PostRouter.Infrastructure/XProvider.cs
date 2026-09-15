@@ -68,7 +68,7 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
         catch (JsonException ex) { throw new XProviderException("x_identity_malformed", false, ex); }
     }
 
-    public async Task<string> UploadImageAsync(string accessToken, XUploadAsset asset, CancellationToken cancellationToken)
+    public async Task<XUploadedMedia> UploadImageAsync(string accessToken, XUploadAsset asset, CancellationToken cancellationToken)
     {
         if (asset.SizeBytes is <= 0 or > 5L * 1024 * 1024)
             throw new XProviderException("media_integrity_mismatch", false);
@@ -96,7 +96,10 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
             {
                 var value = JsonSerializer.Deserialize<XMediaEnvelope>(responseBytes);
                 if (string.IsNullOrWhiteSpace(value?.Data?.Id)) throw new XProviderException("x_media_upload_malformed", false);
-                return value.Data.Id;
+                var expiresAt = value.Data.ExpiresAfterSecs is > 0
+                    ? timeProvider.GetUtcNow().AddSeconds(value.Data.ExpiresAfterSecs.Value)
+                    : timeProvider.GetUtcNow().AddMinutes(5);
+                return new(value.Data.Id, expiresAt);
             }
             catch (JsonException ex) { throw new XProviderException("x_media_upload_malformed", false, ex); }
         }
@@ -219,7 +222,9 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
         [property: JsonPropertyName("media")] XCreatePostMedia? Media);
     private sealed record XCreatePostMedia([property: JsonPropertyName("media_ids")] IReadOnlyList<string> MediaIds);
     private sealed record XMediaEnvelope([property: JsonPropertyName("data")] XMedia? Data);
-    private sealed record XMedia([property: JsonPropertyName("id")] string Id);
+    private sealed record XMedia(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("expires_after_secs")] long? ExpiresAfterSecs);
     private sealed record XPostEnvelope([property: JsonPropertyName("data")] XPost? Data);
     private sealed record XPost([property: JsonPropertyName("id")] string Id);
     private sealed record XUserEnvelope([property: JsonPropertyName("data")] XUser? Data);
@@ -239,6 +244,7 @@ internal sealed record XUser(
 
 internal sealed record XCreatePostResult(bool Success, string? PostId, string? SafeError, DateTimeOffset? RetryAt, bool Ambiguous);
 internal sealed record XUploadAsset(string Path, string Sha256, long SizeBytes);
+internal sealed record XUploadedMedia(string MediaId, DateTimeOffset ExpiresAt);
 
 internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) : IInteractiveAuthProvider
 {
@@ -316,6 +322,8 @@ internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider
 
 internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, TimeProvider timeProvider) : IProviderAdapter
 {
+    private static readonly TimeSpan MediaExpirySafetyMargin = TimeSpan.FromMinutes(1);
+
     public string ProviderKey => "x";
     public ProviderCapabilities Capabilities { get; } = new(
         "x", [ContentKind.TextOnly, ContentKind.ImageSet], ["public"], "x-options/v1", 1, "{}", true, true);
@@ -345,14 +353,17 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
     {
         Validate(input.Content, input.Target);
         var mediaState = ParseCheckpoint(checkpoint);
-        var remaining = input.Content.MediaAssets.Skip(mediaState.MediaIds.Count).FirstOrDefault();
+        if (mediaState.Media.Count > input.Content.MediaAssets.Count || mediaState.Media.Any(media =>
+                string.IsNullOrWhiteSpace(media.MediaId) || media.ExpiresAt <= timeProvider.GetUtcNow().Add(MediaExpirySafetyMargin)))
+            mediaState = new([]);
+        var remaining = input.Content.MediaAssets.Skip(mediaState.Media.Count).FirstOrDefault();
         var plan = remaining is not null
             ? JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "upload-image",
-                new XUploadAsset(remaining.StorageRef, remaining.Sha256, remaining.SizeBytes), mediaState.MediaIds))
-            : JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "create-post", null, mediaState.MediaIds));
+                new XUploadAsset(remaining.StorageRef, remaining.Sha256, remaining.SizeBytes), mediaState.Media))
+            : JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "create-post", null, mediaState.Media));
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(plan)));
         var uploading = remaining is not null;
-        return Task.FromResult(new ProviderStep(uploading ? $"x.upload-image.{mediaState.MediaIds.Count}.v1" : "x.create-post.v2",
+        return Task.FromResult(new ProviderStep(uploading ? $"x.upload-image.{mediaState.Media.Count}.v1" : "x.create-post.v2",
             uploading ? StepEffect.UploadOnly : StepEffect.MayPublish,
             uploading ? ReplaySafety.SafeRepeatNoPublication : ReplaySafety.NotReplayable, digest,
             timeProvider.GetUtcNow(), OpaquePlan: plan));
@@ -387,8 +398,8 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
                 return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "media_unavailable", FailureCategory: FailureCategory.InvalidInput);
             try
             {
-                var mediaId = await client.UploadImageAsync(token.AccessToken, plan.Media, cancellationToken).ConfigureAwait(false);
-                var next = new XMediaCheckpoint([.. plan.MediaIds, mediaId]);
+                var uploaded = await client.UploadImageAsync(token.AccessToken, plan.Media, cancellationToken).ConfigureAwait(false);
+                var next = new XMediaCheckpoint([.. plan.UploadedMedia, new XCheckpointMedia(uploaded.MediaId, uploaded.ExpiresAt)]);
                 return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(next), RetryAt: timeProvider.GetUtcNow());
             }
             catch (XProviderException ex)
@@ -399,7 +410,8 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
             }
         }
 
-        var result = await client.CreateTextPostAsync(token.AccessToken, plan.Text, plan.MediaIds, cancellationToken).ConfigureAwait(false);
+        var mediaIds = plan.UploadedMedia.Select(media => media.MediaId).ToArray();
+        var result = await client.CreateTextPostAsync(token.AccessToken, plan.Text, mediaIds, cancellationToken).ConfigureAwait(false);
         if (result.Success) return new(StepOutcome.Completed, EffectCertainty.Confirmed, result.PostId, ObservedState: PublicationState.Published);
         if (result.Ambiguous) return new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: result.SafeError, FailureCategory: Classify(result.SafeError));
         if (result.RetryAt is not null) return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
@@ -427,10 +439,15 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
     private static XMediaCheckpoint ParseCheckpoint(string? checkpoint)
     {
         if (string.IsNullOrWhiteSpace(checkpoint)) return new([]);
-        try { return JsonSerializer.Deserialize<XMediaCheckpoint>(checkpoint) ?? new([]); }
-        catch (JsonException) { throw new InvalidDataException("X media checkpoint is malformed."); }
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<XMediaCheckpoint>(checkpoint);
+            return parsed?.Media is null ? new([]) : parsed;
+        }
+        catch (JsonException) { return new([]); }
     }
 
-    private sealed record XPublishPlan(Guid AccountId, string Text, string Operation, XUploadAsset? Media, IReadOnlyList<string> MediaIds);
-    private sealed record XMediaCheckpoint(IReadOnlyList<string> MediaIds);
+    private sealed record XPublishPlan(Guid AccountId, string Text, string Operation, XUploadAsset? Media, IReadOnlyList<XCheckpointMedia> UploadedMedia);
+    private sealed record XMediaCheckpoint(IReadOnlyList<XCheckpointMedia> Media);
+    private sealed record XCheckpointMedia(string MediaId, DateTimeOffset ExpiresAt);
 }
