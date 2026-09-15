@@ -7,10 +7,10 @@ public static class PublicationStateMachine
         {
             [PublicationState.Pending] = [PublicationState.Preparing, PublicationState.Ready, PublicationState.AwaitingApproval, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.NeedsAttention],
             [PublicationState.Preparing] = [PublicationState.Ready, PublicationState.AwaitingApproval, PublicationState.Processing, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
-            [PublicationState.Ready] = [PublicationState.AwaitingApproval, PublicationState.Publishing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.Failed, PublicationState.NeedsAttention],
+            [PublicationState.Ready] = [PublicationState.AwaitingApproval, PublicationState.Publishing, PublicationState.Processing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.Failed, PublicationState.NeedsAttention],
             [PublicationState.AwaitingApproval] = [PublicationState.Ready, PublicationState.CancelRequested, PublicationState.Cancelled, PublicationState.NeedsAttention],
             [PublicationState.Publishing] = [PublicationState.Processing, PublicationState.Published, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
-            [PublicationState.Processing] = [PublicationState.Published, PublicationState.Failed, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
+            [PublicationState.Processing] = [PublicationState.Ready, PublicationState.Published, PublicationState.Failed, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.ScheduledRemote] = [PublicationState.Published, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.Unknown] = [PublicationState.Processing, PublicationState.Published, PublicationState.NeedsAttention, PublicationState.Failed],
             [PublicationState.AwaitingUser] = [PublicationState.Published, PublicationState.CancelRequested, PublicationState.NeedsAttention],
