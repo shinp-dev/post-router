@@ -51,8 +51,7 @@ public sealed record Publication(
 public sealed record Job(
     Guid Id, JobKind Kind, JobOwnerType OwnerType, Guid OwnerId, int Priority,
     DateTimeOffset DueAt, JobState State, long Generation, int AttemptNo,
-    Guid? WorkerRunId = null, DateTimeOffset? ClaimedAt = null, string StepKey = "initial",
-    int FailureRetryCount = 0);
+    Guid? WorkerRunId = null, DateTimeOffset? ClaimedAt = null, string StepKey = "initial");
 
 public sealed record Attempt(
     Guid Id, Guid JobId, string StepKey, DispatchState DispatchState, DateTimeOffset StartedAt,
