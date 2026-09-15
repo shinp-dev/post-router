@@ -282,7 +282,7 @@ public static class CliApplication
         connect.SetAction((result, token) => ExecuteAsync(async () =>
         {
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var session = runtime.Accounts.BeginConnect(result.GetValue(connectProvider), result.GetValue(clientId)!, result.GetValue(redirectUri)!, result.GetValue(alias));
+            var session = runtime.Accounts.BeginConnect(result.GetValue(connectProvider)!, result.GetValue(clientId)!, result.GetValue(redirectUri)!, result.GetValue(alias));
             var callback = await ReceiveOAuthCallbackAsync(session, token);
             return await runtime.Accounts.CompleteConnectAsync(session, callback.Code, callback.State, token);
         }));
@@ -372,7 +372,9 @@ public static class CliApplication
                 !string.Equals(callback.AbsolutePath, session.RedirectUri.AbsolutePath, StringComparison.Ordinal))
                 throw new InvalidDataException("OAuth callback path does not match the registered redirect URI.");
             var query = ParseQuery(callback.Query);
-            var success = query.TryGetValue("code", out var code) && query.TryGetValue("state", out var state) && !string.IsNullOrWhiteSpace(code) && !string.IsNullOrWhiteSpace(state);
+            var code = query.GetValueOrDefault("code");
+            var state = query.GetValueOrDefault("state");
+            var success = !string.IsNullOrWhiteSpace(code) && !string.IsNullOrWhiteSpace(state);
             var html = success ? "Authentication received. You may close this window." : "Authentication failed. Return to the CLI.";
             var body = Encoding.UTF8.GetBytes($"<!doctype html><meta charset=utf-8><title>post-router</title><p>{html}</p>");
             var headers = Encoding.ASCII.GetBytes($"HTTP/1.1 {(success ? "200 OK" : "400 Bad Request")}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
