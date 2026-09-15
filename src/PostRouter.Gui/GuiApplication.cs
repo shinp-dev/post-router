@@ -129,6 +129,8 @@ public static class GuiApplication
             var detail = await runtime.Operations.PublicationAsync(publicationId, token).ConfigureAwait(false);
             return detail is null ? Results.NotFound(new GuiError("not_found", "Publication was not found.")) : Results.Json(detail);
         });
+        app.MapGet("/api/publications/{publicationId:guid}/approval", async (Guid publicationId, CancellationToken token) =>
+            Results.Json(await runtime.Operations.PublicationApprovalAsync(publicationId, token).ConfigureAwait(false)));
 
         app.MapPost("/api/posts", async (CreateTextPostRequest request, CancellationToken token) =>
             Results.Json(await runtime.Operations.EnqueueTextAsync(request, token).ConfigureAwait(false)));
@@ -191,6 +193,11 @@ public static class GuiApplication
         {
             await runtime.Operations.ReconcileAsync(publicationId, token).ConfigureAwait(false);
             return Results.Json(new { publicationId, queued = true, reposted = false });
+        });
+        app.MapPost("/api/publications/{publicationId:guid}/approve", async (Guid publicationId, CancellationToken token) =>
+        {
+            await runtime.Operations.ApproveAsync(publicationId, token).ConfigureAwait(false);
+            return Results.Json(new { publicationId, approved = true });
         });
 
         app.MapPost("/api/accounts/connect", (ConnectRequest request, HttpContext context) =>

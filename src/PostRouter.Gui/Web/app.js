@@ -146,13 +146,18 @@ function actionButton(label, handler, style = "") {
 
 async function openDetail(id) {
   try {
-    const detail = await request(`/api/publications/${id}`);
+    const [detail, approval] = await Promise.all([
+      request(`/api/publications/${id}`),
+      request(`/api/publications/${id}/approval`)
+    ]);
     const content = byId("detail-content"); content.replaceChildren();
     if (detail.summary.publicationState === "Unknown") addAlert(content, "投稿された可能性があります。自動再投稿は行われず、照合でも確定できない場合があります。", false);
+    if (detail.summary.publicationState === "AwaitingApproval") addAlert(content, "公開前で停止しています。内容と公開先を確認してから承認してください。", false);
     const text = document.createElement("p"); text.className = "full-text"; text.textContent = detail.text || "";
     const dl = document.createElement("dl");
     addDefinition(dl, "Provider / Account", `${detail.summary.provider} / ${detail.summary.accountAlias}`);
     addDefinition(dl, "Publication", detail.summary.publicationState);
+    addDefinition(dl, "Approval", approval.policy === "RequireApproval" ? (approval.approved ? "Approved" : "Required") : "Automatic");
     addDefinition(dl, "Queue", detail.summary.jobState ? `${detail.summary.jobKind} / ${detail.summary.jobState}` : "—");
     addDefinition(dl, "Scheduled", formatTime(detail.summary.dueAt)); addDefinition(dl, "Attempts", detail.summary.attemptCount);
     addDefinition(dl, "Remote ID", detail.summary.remoteId || "—"); addDefinition(dl, "Provider error", detail.providerError || "—");
@@ -161,6 +166,12 @@ async function openDetail(id) {
     addDefinition(dl, "Confirmed", formatTime(detail.confirmedAt)); addDefinition(dl, "Published", formatTime(detail.summary.publishedAt));
     content.append(text, dl);
     const actions = byId("detail-actions"); actions.replaceChildren();
+    if (approval.canApprove) {
+      actions.append(actionButton("Approve publish", () => confirmAction(
+        "公開を承認",
+        "この投稿の公開境界を解除し、workerがProviderへの公開操作を実行できるようにします。",
+        () => postAction(`/api/publications/${id}/approve`, "公開を承認しました。"))));
+    }
     const cancel = actionButton("Cancel", () => postAction(`/api/posts/${detail.summary.postId}/cancel`, "キャンセルを要求しました。"), "secondary"); cancel.disabled = !detail.canCancel; actions.append(cancel);
     const retry = actionButton("Retry", () => postAction(`/api/publications/${id}/retry`, "安全な再試行をqueueへ登録しました。")); retry.disabled = !detail.canRetry; actions.append(retry);
     const reconcile = actionButton("Reconcile", () => postAction(`/api/publications/${id}/reconcile`, "照合をqueueへ登録しました。再投稿はしていません。")); reconcile.disabled = !detail.canReconcile; actions.append(reconcile);

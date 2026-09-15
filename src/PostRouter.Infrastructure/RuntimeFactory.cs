@@ -6,27 +6,46 @@ namespace PostRouter.Infrastructure;
 public sealed class PostRouterRuntime : IAsyncDisposable
 {
     private readonly AesGcmSecretProtector _protector;
-    private readonly HttpClient _httpClient;
-    internal PostRouterRuntime(string dataDirectory, SqliteStore store, FakeProvider fakeProvider, bool fakeEnabled, FileMaintenanceGate maintenanceGate, AesGcmSecretProtector protector, HttpClient httpClient)
+    private readonly HttpClient _xHttpClient;
+    private readonly HttpClient _youtubeHttpClient;
+
+    internal PostRouterRuntime(
+        string dataDirectory,
+        SqliteStore store,
+        FakeProvider fakeProvider,
+        bool fakeEnabled,
+        FileMaintenanceGate maintenanceGate,
+        AesGcmSecretProtector protector,
+        HttpClient xHttpClient,
+        HttpClient youtubeHttpClient)
     {
         DataDirectory = dataDirectory;
         Store = store;
         FakeProvider = fakeProvider;
         MaintenanceGate = maintenanceGate;
         _protector = protector;
-        _httpClient = httpClient;
+        _xHttpClient = xHttpClient;
+        _youtubeHttpClient = youtubeHttpClient;
         var database = new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db"));
         Approvals = new PublicationApprovalStore(database);
-        var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System, database);
         var accountLocks = new FileAccountOperationLockFactory(Path.Combine(dataDirectory, "locks"));
         var grantLocks = new FileAuthGrantLockFactory(Path.Combine(dataDirectory, "locks"));
-        var xClient = new XApiClient(httpClient, TimeProvider.System);
+        var xClient = new XApiClient(xHttpClient, TimeProvider.System);
         var xAuth = new XAuthProvider(xClient, TimeProvider.System);
-        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth], TimeProvider.System);
-        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth], Auth);
+        var youtubeClient = new YouTubeApiClient(youtubeHttpClient, TimeProvider.System);
+        var youtubeAuth = new YouTubeConsentAuthProvider(new YouTubeAuthProvider(youtubeClient, TimeProvider.System));
+        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth, youtubeAuth], TimeProvider.System);
+        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth, youtubeAuth], Auth);
+        var xAdapter = new XProviderAdapter(Auth, xClient, TimeProvider.System);
+        var youtubeAdapter = new YouTubeResumeSafeAdapter(
+            new YouTubeProviderAdapter(Auth, youtubeClient, TimeProvider.System),
+            TimeProvider.System,
+            Auth,
+            youtubeClient);
         var adapters = fakeEnabled
-            ? new IProviderAdapter[] { fakeProvider, new XProviderAdapter(Auth, xClient, TimeProvider.System) }
-            : [new XProviderAdapter(Auth, xClient, TimeProvider.System)];
+            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter }
+            : [xAdapter, youtubeAdapter];
         var providers = new ProviderRegistry(adapters);
         Posts = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
         Operations = new(applicationStore, maintenanceGate, providers, Posts, TimeProvider.System, Approvals);
@@ -36,6 +55,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, spoolDirectory), applicationStore, TimeProvider.System);
         Spool = new SpoolStore(spoolDirectory);
     }
+
     public string DataDirectory { get; }
     public SqliteStore Store { get; }
     public PublicationApprovalStore Approvals { get; }
@@ -49,12 +69,22 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     public StatsService Stats { get; }
     public MaintenanceService Maintenance { get; }
     public SpoolStore Spool { get; }
-    public async ValueTask DisposeAsync() { await Worker.DisposeAsync(); _httpClient.Dispose(); _protector.Dispose(); }
+
+    public async ValueTask DisposeAsync()
+    {
+        await Worker.DisposeAsync();
+        _youtubeHttpClient.Dispose();
+        _xHttpClient.Dispose();
+        _protector.Dispose();
+    }
 }
 
 public static class RuntimeFactory
 {
-    public static async Task<PostRouterRuntime> CreateAsync(string? dataDirectory = null, IMasterKeyStore? keyStore = null, CancellationToken cancellationToken = default)
+    public static async Task<PostRouterRuntime> CreateAsync(
+        string? dataDirectory = null,
+        IMasterKeyStore? keyStore = null,
+        CancellationToken cancellationToken = default)
     {
         var directory = Path.GetFullPath(dataDirectory ?? DefaultDataDirectory());
         Directory.CreateDirectory(directory);
@@ -69,13 +99,28 @@ public static class RuntimeFactory
             await using (var lease = await maintenanceGate.AcquireSharedAsync(cancellationToken).ConfigureAwait(false))
                 await store.InitializeAsync(cancellationToken).ConfigureAwait(false);
             var fakeEnabled = string.Equals(Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE"), "test", StringComparison.Ordinal);
-            var httpClient = new HttpClient { BaseAddress = new Uri("https://api.x.com/"), Timeout = TimeSpan.FromSeconds(100) };
-            return new PostRouterRuntime(directory, store, new FakeProvider(), fakeEnabled, maintenanceGate, protector, httpClient);
+            var xHttpClient = new HttpClient
+            {
+                BaseAddress = new Uri("https://api.x.com/"),
+                Timeout = TimeSpan.FromSeconds(100),
+            };
+            // A resumable YouTube data PUT may legitimately run far longer than the normal API
+            // request timeout. Bound it independently so a healthy large upload is not turned into
+            // a sequence of artificial 100-second failures; interruption still resumes by remote offset.
+            var youtubeHttpClient = new HttpClient
+            {
+                BaseAddress = new Uri("https://www.googleapis.com/"),
+                Timeout = TimeSpan.FromHours(12),
+            };
+            return new PostRouterRuntime(
+                directory, store, new FakeProvider(), fakeEnabled, maintenanceGate, protector,
+                xHttpClient, youtubeHttpClient);
         }
         finally { CryptographicOperations.ZeroMemory(key); }
     }
 
     private static string DefaultDataDirectory() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "post-router");
+
     private static InMemoryMasterKeyStore TestKeyStoreFromEnvironment()
     {
         if (Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE") != "test")
