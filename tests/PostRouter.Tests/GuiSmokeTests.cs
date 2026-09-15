@@ -162,7 +162,7 @@ public sealed class GuiSmokeTests
             Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
             Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", Convert.ToBase64String(key));
             var directory = Path.Combine(Path.GetTempPath(), "post-router-gui-tests", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(directory);
+            System.IO.Directory.CreateDirectory(directory);
             var runtime = await RuntimeFactory.CreateAsync(directory, new InMemoryMasterKeyStore(key));
             _ = await runtime.Posts.EnqueueAsync(new CanonicalPostIntent(
                 "fake-account-seed", new Content(Guid.NewGuid(), ContentKind.TextOnly, "seed", null, []),
