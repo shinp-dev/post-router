@@ -35,3 +35,21 @@ fake HTTP / durable workerで次を検証する。
 ## 動画を同時実装しない理由
 
 動画はinitialize / append（複数segment）/ finalize / status / Post作成となる。現行coreのattempt上限8は失敗retry用であり、正常なsegment progressをattemptとして数えると大容量動画を誤って打ち切る。Phase 2C-2でprogress stepとfailure retry budgetを分離してから実装する。
+
+## Phase 2C-2 — X native video status: Pending
+
+2026-09-16時点で、Xのnative動画投稿は**Pending**とする。
+
+理由はchunked upload自体の実装難度だけではない。Xの公開仕様では動画processingについて`pending` / `in_progress` / `succeeded` / `failed`のような粗い状態は扱える一方、`failed`になった場合の詳細原因と、それぞれを安全に再実行してよいかどうかを判断できる安定した失敗分類の契約が十分に確認できていない。
+
+原因が不明な`failed`を機械的にqueueへ戻して再upload・再処理すると、入力不適合、entitlement、policy、その他の恒久失敗まで一時障害として反復する可能性がある。さらにPost作成境界まで誤って再試行すると重複投稿や過剰な自動化挙動につながるため、アカウント運用上のリスクもある。
+
+このため、詳細失敗状態とreplay safetyを推測してnative動画投稿を実装・有効化しない。少なくとも以下が満たされるまでPhase 2C-2はPendingを維持する。
+
+- 公式仕様または管理されたlive受入試験から、動画processing failureの分類と再試行可否を十分に根拠付けできること
+- initialize / append / finalize / status / Post作成ごとのreplay safetyを定義できること
+- 正常なsegment progressとfailure retry budgetを分離できること
+- 自動retryの上限・backoffと、`NeedsAttention` / `Unknown`へ停止する境界を定義できること
+- 実Xアカウントでの限定受入試験を通せること
+
+Pending中のX Providerの実装済み範囲はtext-onlyおよびJPEG画像投稿までとし、native動画投稿は対応済みとして扱わない。
