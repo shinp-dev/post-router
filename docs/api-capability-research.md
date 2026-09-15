@@ -1,6 +1,6 @@
 # 公式API調査とCapability Matrix
 
-確認日: **2026-09-14**。対象: X API v2、TikTok for Developers v2、YouTube Data API v3 / Analytics API v2、Instagram Platform。広告API、Research API、UIだけの機能を通常投稿APIの能力として数えない。
+確認日: **2026-09-15**（X Phase 2Aを再確認。他Providerは2026-09-14）。対象: X API v2、TikTok for Developers v2、YouTube Data API v3 / Analytics API v2、Instagram Platform。広告API、Research API、UIだけの機能を通常投稿APIの能力として数えない。
 
 ## 証拠の扱い
 

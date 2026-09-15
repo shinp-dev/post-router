@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://post-router.local/contracts/post-manifest-v1.schema.json",
-  "title": "Post Router Phase 1 manifest",
+  "title": "Post Router manifest v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "clientRequestId", "content", "targets"],
@@ -45,7 +45,7 @@
         "required": ["account"],
         "properties": {
           "account": { "type": "string", "minLength": 1 },
-          "provider": { "const": "fake", "default": "fake" },
+          "provider": { "enum": ["fake", "x"], "default": "fake" },
           "visibility": { "type": "string", "default": "public" },
           "optionsVersion": { "const": 1 },
           "options": { "type": "object" }

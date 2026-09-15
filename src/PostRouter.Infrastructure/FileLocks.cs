@@ -85,3 +85,27 @@ public sealed class FileAuthGrantLockFactory(string directory) : IAuthGrantLockF
     }
     private sealed class GrantLock(FileStream stream) : IAuthGrantLock { public ValueTask DisposeAsync() => stream.DisposeAsync(); }
 }
+
+public sealed class FileAccountOperationLockFactory(string directory) : IAccountOperationLockFactory
+{
+    public async ValueTask<IAccountOperationLock> AcquireAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        var stream = await FileLockHelpers.TryOpenAsync(
+            Path.Combine(Path.GetFullPath(directory), $"account-{accountId:D}.lock"),
+            FileAccess.ReadWrite, FileShare.None, TimeSpan.FromSeconds(30), cancellationToken)
+            ?? throw new TimeoutException("Account operation is busy.");
+        return new AccountLock(stream);
+    }
+
+    private sealed class AccountLock(FileStream stream) : IAccountOperationLock
+    {
+        public ValueTask DisposeAsync() => stream.DisposeAsync();
+    }
+}
+
+public sealed class NoOpAccountOperationLockFactory : IAccountOperationLockFactory
+{
+    public ValueTask<IAccountOperationLock> AcquireAsync(Guid accountId, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<IAccountOperationLock>(new NoOpLock());
+    private sealed class NoOpLock : IAccountOperationLock { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
+}

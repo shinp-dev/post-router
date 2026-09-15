@@ -6,16 +6,27 @@ namespace PostRouter.Infrastructure;
 public sealed class PostRouterRuntime : IAsyncDisposable
 {
     private readonly AesGcmSecretProtector _protector;
-    internal PostRouterRuntime(string dataDirectory, SqliteStore store, FakeProvider fakeProvider, bool fakeEnabled, FileMaintenanceGate maintenanceGate, AesGcmSecretProtector protector)
+    private readonly HttpClient _httpClient;
+    internal PostRouterRuntime(string dataDirectory, SqliteStore store, FakeProvider fakeProvider, bool fakeEnabled, FileMaintenanceGate maintenanceGate, AesGcmSecretProtector protector, HttpClient httpClient)
     {
         DataDirectory = dataDirectory;
         Store = store;
         FakeProvider = fakeProvider;
         MaintenanceGate = maintenanceGate;
         _protector = protector;
-        var providers = new ProviderRegistry(fakeEnabled ? [fakeProvider] : []);
+        _httpClient = httpClient;
+        var accountLocks = new FileAccountOperationLockFactory(Path.Combine(dataDirectory, "locks"));
+        var grantLocks = new FileAuthGrantLockFactory(Path.Combine(dataDirectory, "locks"));
+        var xClient = new XApiClient(httpClient, TimeProvider.System);
+        var xAuth = new XAuthProvider(xClient, TimeProvider.System);
+        Auth = new(store, store, grantLocks, maintenanceGate, [fakeProvider, xAuth], TimeProvider.System);
+        Accounts = new(store, store, maintenanceGate, accountLocks, [xAuth], Auth);
+        var adapters = fakeEnabled
+            ? new IProviderAdapter[] { fakeProvider, new XProviderAdapter(Auth, xClient, TimeProvider.System) }
+            : [new XProviderAdapter(Auth, xClient, TimeProvider.System)];
+        var providers = new ProviderRegistry(adapters);
         Posts = new(store, maintenanceGate, providers, TimeProvider.System);
-        Worker = new(store, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System);
+        Worker = new(store, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System, accountOperationLocks: accountLocks);
         Stats = new(store, maintenanceGate, providers, TimeProvider.System);
         var spoolDirectory = Path.Combine(dataDirectory, "spool");
         Maintenance = new(new DatabaseMaintenance(new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db")), maintenanceGate, spoolDirectory), store, TimeProvider.System);
@@ -25,12 +36,14 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     public SqliteStore Store { get; }
     public FakeProvider FakeProvider { get; }
     public FileMaintenanceGate MaintenanceGate { get; }
+    public AuthCoordinator Auth { get; }
+    public AccountConnectionService Accounts { get; }
     public PostService Posts { get; }
     public WorkerService Worker { get; }
     public StatsService Stats { get; }
     public MaintenanceService Maintenance { get; }
     public SpoolStore Spool { get; }
-    public async ValueTask DisposeAsync() { await Worker.DisposeAsync(); _protector.Dispose(); }
+    public async ValueTask DisposeAsync() { await Worker.DisposeAsync(); _httpClient.Dispose(); _protector.Dispose(); }
 }
 
 public static class RuntimeFactory
@@ -50,7 +63,8 @@ public static class RuntimeFactory
             await using (var lease = await maintenanceGate.AcquireSharedAsync(cancellationToken).ConfigureAwait(false))
                 await store.InitializeAsync(cancellationToken).ConfigureAwait(false);
             var fakeEnabled = string.Equals(Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE"), "test", StringComparison.Ordinal);
-            return new PostRouterRuntime(directory, store, new FakeProvider(), fakeEnabled, maintenanceGate, protector);
+            var httpClient = new HttpClient { BaseAddress = new Uri("https://api.x.com/"), Timeout = TimeSpan.FromSeconds(100) };
+            return new PostRouterRuntime(directory, store, new FakeProvider(), fakeEnabled, maintenanceGate, protector, httpClient);
         }
         finally { CryptographicOperations.ZeroMemory(key); }
     }

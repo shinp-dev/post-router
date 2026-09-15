@@ -1,4 +1,8 @@
 using System.CommandLine;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PostRouter.Infrastructure;
@@ -36,7 +40,8 @@ public static class CliApplication
         {
             var input = result.GetValue(file) ?? throw new ArgumentException("--file is required.");
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var intent = await ManifestReader.ReadAsync(input.FullName, runtime.Spool, TimeProvider.System, token);
+            var accounts = await runtime.Posts.AccountsAsync(token);
+            var intent = await ManifestReader.ReadAsync(input.FullName, runtime.Spool, accounts, TimeProvider.System, token);
             var queued = await runtime.Posts.EnqueueAsync(intent, token);
             return new { postId = queued.PostId, queued.Existing, publicationIds = queued.PublicationIds };
         }));
@@ -261,15 +266,134 @@ public static class CliApplication
 
     private static Command BuildAccount(Option<string?> dataDirectory)
     {
-        var account = new Command("account", "Provider accounts are added in provider phases");
+        var account = new Command("account", "Connect and manage provider accounts");
         var list = new Command("list");
         list.SetAction((result, token) => ExecuteAsync(async () =>
         {
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
             return await runtime.Posts.AccountsAsync(token);
         }));
+        var connect = new Command("connect", "Connect an X account with OAuth 2.0 PKCE");
+        var connectProvider = new Argument<string>("provider");
+        var clientId = new Option<string>("--client-id") { Required = true };
+        var redirectUri = new Option<Uri>("--redirect-uri") { Required = true };
+        var alias = new Option<string?>("--alias");
+        connect.Arguments.Add(connectProvider); connect.Options.Add(clientId); connect.Options.Add(redirectUri); connect.Options.Add(alias);
+        connect.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var session = runtime.Accounts.BeginConnect(result.GetValue(connectProvider), result.GetValue(clientId)!, result.GetValue(redirectUri)!, result.GetValue(alias));
+            var callback = await ReceiveOAuthCallbackAsync(session, token);
+            return await runtime.Accounts.CompleteConnectAsync(session, callback.Code, callback.State, token);
+        }));
+        var status = new Command("status", "Show non-secret connection metadata");
+        var statusAccount = new Option<Guid>("--account") { Required = true };
+        status.Options.Add(statusAccount);
+        status.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.Accounts.StatusAsync(result.GetValue(statusAccount), token) ?? throw new KeyNotFoundException("Account not found.");
+        }));
+        var disconnect = BuildDisconnectCommand("disconnect", "Remove local credentials and pause queued jobs", dataDirectory);
+        var reset = BuildDisconnectCommand("reset", "Reset local authentication without deleting history", dataDirectory);
+        var revoke = new Command("revoke", "Revoke at X, then remove local credentials");
+        var revokeAccount = new Option<Guid>("--account") { Required = true };
+        revoke.Options.Add(revokeAccount);
+        revoke.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.Accounts.RevokeAsync(result.GetValue(revokeAccount), token);
+        }));
+        var reconnect = new Command("reconnect", "Reconnect the same remote account");
+        var reconnectAccount = new Option<Guid>("--account") { Required = true };
+        var reconnectRedirect = new Option<Uri>("--redirect-uri") { Required = true };
+        reconnect.Options.Add(reconnectAccount); reconnect.Options.Add(reconnectRedirect);
+        reconnect.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var session = await runtime.Accounts.BeginReconnectAsync(result.GetValue(reconnectAccount), result.GetValue(reconnectRedirect)!, token);
+            var callback = await ReceiveOAuthCallbackAsync(session, token);
+            return await runtime.Accounts.CompleteConnectAsync(session, callback.Code, callback.State, token);
+        }));
         account.Subcommands.Add(list);
+        account.Subcommands.Add(connect);
+        account.Subcommands.Add(status);
+        account.Subcommands.Add(disconnect);
+        account.Subcommands.Add(reset);
+        account.Subcommands.Add(revoke);
+        account.Subcommands.Add(reconnect);
         return account;
+    }
+
+    private static Command BuildDisconnectCommand(string name, string description, Option<string?> dataDirectory)
+    {
+        var command = new Command(name, description);
+        var accountId = new Option<Guid>("--account") { Required = true };
+        command.Options.Add(accountId);
+        command.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var id = result.GetValue(accountId);
+            if (!await runtime.Accounts.DisconnectAsync(id, token)) throw new KeyNotFoundException("Account not found.");
+            return new { accountId = id, status = "Disconnected", historyPreserved = true, queuedJobsPreserved = true };
+        }));
+        return command;
+    }
+
+    private static async Task<(string Code, string State)> ReceiveOAuthCallbackAsync(PostRouter.Application.AuthorizationSession session, CancellationToken cancellationToken)
+    {
+        var address = string.Equals(session.RedirectUri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+            ? IPAddress.Loopback
+            : IPAddress.Parse(session.RedirectUri.Host);
+        var listener = new TcpListener(address, session.RedirectUri.Port);
+        listener.Start(1);
+        try
+        {
+            try { Process.Start(new ProcessStartInfo(session.AuthorizationUri.AbsoluteUri) { UseShellExecute = true }); }
+            catch { Console.Error.WriteLine($"Open this authorization URL in your browser: {session.AuthorizationUri.AbsoluteUri}"); }
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            using var client = await listener.AcceptTcpClientAsync(timeout.Token);
+            await using var stream = client.GetStream();
+            using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync(timeout.Token) ?? throw new InvalidDataException("OAuth callback request is empty.");
+            if (requestLine.Length > 8192) throw new InvalidDataException("OAuth callback request is too large.");
+            for (var lines = 0; lines < 100; lines++)
+            {
+                var header = await reader.ReadLineAsync(timeout.Token) ?? throw new InvalidDataException("OAuth callback headers are incomplete.");
+                if (header.Length == 0) break;
+                if (header.Length > 8192 || lines == 99) throw new InvalidDataException("OAuth callback headers are too large.");
+            }
+            var parts = requestLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 3 || !string.Equals(parts[0], "GET", StringComparison.Ordinal)) throw new InvalidDataException("OAuth callback method is invalid.");
+            var callback = new Uri(session.RedirectUri, parts[1]);
+            if (!string.Equals(callback.Scheme, session.RedirectUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(callback.Host, session.RedirectUri.Host, StringComparison.OrdinalIgnoreCase) || callback.Port != session.RedirectUri.Port ||
+                !string.Equals(callback.AbsolutePath, session.RedirectUri.AbsolutePath, StringComparison.Ordinal))
+                throw new InvalidDataException("OAuth callback path does not match the registered redirect URI.");
+            var query = ParseQuery(callback.Query);
+            var success = query.TryGetValue("code", out var code) && query.TryGetValue("state", out var state) && !string.IsNullOrWhiteSpace(code) && !string.IsNullOrWhiteSpace(state);
+            var html = success ? "Authentication received. You may close this window." : "Authentication failed. Return to the CLI.";
+            var body = Encoding.UTF8.GetBytes($"<!doctype html><meta charset=utf-8><title>post-router</title><p>{html}</p>");
+            var headers = Encoding.ASCII.GetBytes($"HTTP/1.1 {(success ? "200 OK" : "400 Bad Request")}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(headers, timeout.Token); await stream.WriteAsync(body, timeout.Token);
+            if (!success) throw new InvalidOperationException("oauth_authorization_failed");
+            return (code!, state!);
+        }
+        finally { listener.Stop(); }
+    }
+
+    private static Dictionary<string, string> ParseQuery(string query)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pair = part.Split('=', 2);
+            var key = Uri.UnescapeDataString(pair[0].Replace('+', ' '));
+            var value = pair.Length == 2 ? Uri.UnescapeDataString(pair[1].Replace('+', ' ')) : string.Empty;
+            result[key] = value;
+        }
+        return result;
     }
 
     private static async Task<int> ExecuteAsync(Func<Task<object>> action)
@@ -286,6 +410,7 @@ public static class CliApplication
         catch (System.Security.Cryptography.CryptographicException) { WriteError("credential_unavailable", "Protected data could not be read."); return 7; }
         catch (IOException) { WriteError("io_error", "A required local file operation failed."); return 7; }
         catch (JsonException) { WriteError("invalid_json", "A JSON document is malformed or incompatible."); return 2; }
+        catch (XProviderException ex) { WriteError("provider_error", ex.SafeCode); return ex.Retryable ? 7 : 2; }
         catch (Exception ex) { WriteError("internal_error", ex.GetType().Name); return 1; }
     }
 

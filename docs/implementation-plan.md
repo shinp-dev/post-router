@@ -35,6 +35,8 @@ Phase 1全体の自動試験は `tests/PostRouter.Tests` に置く。enqueue冪�
 
 ## Phase 2 — X
 
+Phase 2A実装済み（2026-09-15、実credential受入は未実施）: OAuth PKCE、安全なtoken保存/refresh/revoke、account disconnect/reset/reconnect、text-only create、Post ID保存、Unknown安全策。画像・動画・delete・metricsはPhase 2B以降へ残す。[Phase 2A記録](phase2a-x.md)
+
 理由: text/image/videoの3形式を一つのproviderで検証でき、canonical形式差と非冪等createの回復を早期に評価できる。費用を管理した小さいpilotに限定する。
 
 内容: Native OAuth PKCE、media v2、通常Post、delete、local scheduling、owned/public metrics、rate budget。G-XとG-RETを閉じ、endpoint/account別の制約をcapabilityに反映する。

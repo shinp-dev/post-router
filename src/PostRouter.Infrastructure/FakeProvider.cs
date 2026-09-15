@@ -11,6 +11,8 @@ public sealed class FakeProvider : IProviderAdapter, IAuthProvider, IMetricsProv
     private int _publishCalls;
     private int _refreshCalls;
     public string ProviderKey => "fake";
+    public bool RequiresConnectedAccount => false;
+    public void Validate(Content content, TargetIntent target) { }
     public int PublishCalls => Volatile.Read(ref _publishCalls);
     public int RefreshCalls => Volatile.Read(ref _refreshCalls);
     public TimeSpan Delay { get; set; }
@@ -32,7 +34,7 @@ public sealed class FakeProvider : IProviderAdapter, IAuthProvider, IMetricsProv
     public Task<StepResult> ReconcileAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken) =>
         Task.FromResult(_reconcile.TryDequeue(out var result) ? result : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, RetryAt: DateTimeOffset.UtcNow.AddMinutes(1)));
 
-    public Task<RefreshResult> RefreshAsync(TokenMaterial current, CancellationToken cancellationToken)
+    public Task<RefreshResult> RefreshAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _refreshCalls);
         return Task.FromResult(new RefreshResult(new($"access-{Guid.NewGuid():N}", current.RefreshToken ?? "refresh", DateTimeOffset.UtcNow.AddHours(1)), "fake-request"));

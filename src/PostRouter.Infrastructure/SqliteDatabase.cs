@@ -6,7 +6,7 @@ namespace PostRouter.Infrastructure;
 
 public sealed class SqliteDatabase
 {
-    internal const int CurrentSchemaVersion = 1;
+    internal const int CurrentSchemaVersion = 2;
     private readonly string _connectionString;
 
     public SqliteDatabase(string databasePath)
@@ -138,6 +138,25 @@ CREATE INDEX ix_raw_expiry ON raw_metric_responses(expires_at);
 INSERT INTO installations(id,schema_version,created_at) VALUES('default',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 """;
 
-        public static IReadOnlyList<Migration> All { get; } = [new(1, "initial", Initial)];
+        private const string ProviderAccounts = """
+ALTER TABLE accounts ADD COLUMN remote_subject TEXT NULL;
+ALTER TABLE accounts ADD COLUMN display_name TEXT NULL;
+ALTER TABLE accounts ADD COLUMN client_id TEXT NULL;
+ALTER TABLE accounts ADD COLUMN scope TEXT NULL;
+ALTER TABLE accounts ADD COLUMN auth_grant_id TEXT NULL REFERENCES auth_grants(id);
+ALTER TABLE auth_grants ADD COLUMN account_id TEXT NULL REFERENCES accounts(id);
+ALTER TABLE auth_grants ADD COLUMN client_id TEXT NULL;
+ALTER TABLE auth_grants ADD COLUMN scope TEXT NULL;
+CREATE UNIQUE INDEX ux_accounts_provider_subject ON accounts(provider_key,remote_subject) WHERE remote_subject IS NOT NULL;
+CREATE UNIQUE INDEX ux_accounts_provider_alias_nocase ON accounts(provider_key COLLATE NOCASE,alias COLLATE NOCASE);
+CREATE UNIQUE INDEX ux_auth_grants_account ON auth_grants(account_id) WHERE account_id IS NOT NULL;
+UPDATE installations SET schema_version=2;
+""";
+
+        public static IReadOnlyList<Migration> All { get; } =
+        [
+            new(1, "initial", Initial),
+            new(2, "provider_accounts", ProviderAccounts),
+        ];
     }
 }
