@@ -46,8 +46,9 @@ public sealed class OperationsService(
         var capability = adapter.Capabilities;
         if (!capability.ContentKinds.Contains(ContentKind.TextOnly))
             throw new NotSupportedException("The selected provider does not support text posts.");
-        var visibility = capability.Visibilities.FirstOrDefault()
-            ?? throw new NotSupportedException("The selected provider has no supported visibility.");
+        if (capability.Visibilities.Count == 0)
+            throw new NotSupportedException("The selected provider has no supported visibility.");
+        var visibility = capability.Visibilities[0];
         var now = timeProvider.GetUtcNow();
         var dueAt = request.PublishAt?.ToUniversalTime() ?? now;
         var schedule = new ScheduleIntent(
