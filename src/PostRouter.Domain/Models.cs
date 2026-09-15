@@ -51,7 +51,8 @@ public sealed record Publication(
 public sealed record Job(
     Guid Id, JobKind Kind, JobOwnerType OwnerType, Guid OwnerId, int Priority,
     DateTimeOffset DueAt, JobState State, long Generation, int AttemptNo,
-    Guid? WorkerRunId = null, DateTimeOffset? ClaimedAt = null, string StepKey = "initial");
+    Guid? WorkerRunId = null, DateTimeOffset? ClaimedAt = null, string StepKey = "initial",
+    int FailureRetryCount = 0);
 
 public sealed record Attempt(
     Guid Id, Guid JobId, string StepKey, DispatchState DispatchState, DateTimeOffset StartedAt,
@@ -65,7 +66,8 @@ public sealed record ProviderStep(
 public sealed record StepResult(
     StepOutcome Outcome, EffectCertainty EffectCertainty, string? RemoteObjectId = null,
     string? Checkpoint = null, string? SafeError = null, DateTimeOffset? RetryAt = null,
-    PublicationState? ObservedState = null, FailureCategory? FailureCategory = null);
+    PublicationState? ObservedState = null, FailureCategory? FailureCategory = null,
+    bool ConsumesRetryBudget = true);
 
 public sealed record EnqueueResult(Guid PostId, bool Existing, IReadOnlyList<Guid> PublicationIds);
 
