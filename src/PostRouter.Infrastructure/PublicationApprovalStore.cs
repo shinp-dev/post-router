@@ -12,11 +12,11 @@ public sealed class PublicationApprovalStore(SqliteDatabase database) : IPublica
 
     public async Task<bool> TryEnterPublicationBoundaryAsync(
         PublicationWorkItem item,
-        ProviderStep step,
+        ProviderStep providerStep,
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
-        if (step.Effect != StepEffect.MayPublish) return true;
+        if (providerStep.Effect != StepEffect.MayPublish) return true;
 
         await using var connection = await database.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction();
