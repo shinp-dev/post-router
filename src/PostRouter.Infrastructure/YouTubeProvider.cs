@@ -683,7 +683,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                     ObservedState: PublicationState.Published);
             return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: checkpoint,
                 SafeError: "youtube_publish_not_observed", RetryAt: timeProvider.GetUtcNow().AddMinutes(5),
-                FailureCategory: FailureCategory.Unknown, ConsumesRetryBudget: false);
+                FailureCategory: FailureCategory.Unknown);
         }
         catch (YouTubeProviderException ex)
         {
@@ -699,7 +699,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         var session = await client.StartResumableUploadAsync(
             token, plan.Asset, plan.Title, plan.Description, plan.Options, cancellationToken).ConfigureAwait(false);
         var next = plan.Checkpoint with { SessionUri = session.AbsoluteUri, NextOffset = 0, NeedsStatusQuery = false, Stage = "uploading" };
-        return Progress(next);
+        return Continue(next, JobKind.Publish);
     }
 
     private async Task<StepResult> QueryAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
@@ -728,7 +728,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 NeedsStatusQuery = false,
                 Stage = "processing",
             };
-            return Progress(next, timeProvider.GetUtcNow());
+            return Continue(next, JobKind.Poll, timeProvider.GetUtcNow(), PublicationState.Processing);
         }
         if (result.SessionExpired)
         {
@@ -749,7 +749,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
             result.NeedsStatusQuery ? EffectCertainty.Ambiguous : EffectCertainty.Confirmed,
             Checkpoint: JsonSerializer.Serialize(nextState), SafeError: result.SafeError,
             RetryAt: result.RetryAt ?? timeProvider.GetUtcNow(), FailureCategory: result.SafeError is null ? null : FailureCategory.Network,
-            ConsumesRetryBudget: !normalProgress);
+            NextJobKind: normalProgress ? JobKind.Publish : null);
     }
 
     private async Task<StepResult> ObserveAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
@@ -780,10 +780,10 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 Status = Snapshot(observed.Status),
                 StatusCheckedAt = timeProvider.GetUtcNow(),
             };
-            return Progress(next, timeProvider.GetUtcNow());
+            return Continue(next, JobKind.Publish, timeProvider.GetUtcNow(), PublicationState.Ready);
         }
         if (upload is "uploaded" or "processed" || processing is "processing")
-            return Progress(plan.Checkpoint, timeProvider.GetUtcNow().AddSeconds(30));
+            return Continue(plan.Checkpoint, JobKind.Poll, timeProvider.GetUtcNow().AddSeconds(30), PublicationState.Processing);
         return Reject("youtube_processing_status_unknown", FailureCategory.Provider, PublicationState.NeedsAttention);
     }
 
@@ -792,11 +792,12 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         var observed = await client.GetVideoAsync(token, plan.Checkpoint.VideoId!, cancellationToken).ConfigureAwait(false);
         if (!string.Equals(observed.Status.UploadStatus, "processed", StringComparison.Ordinal) ||
             !string.Equals(observed.ProcessingDetails?.ProcessingStatus, "succeeded", StringComparison.Ordinal))
-            return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(plan.Checkpoint with { Stage = "processing" }),
-                RetryAt: timeProvider.GetUtcNow().AddSeconds(30), SafeError: "youtube_processing_regressed",
-                FailureCategory: FailureCategory.Provider, ConsumesRetryBudget: false);
+        {
+            var processing = plan.Checkpoint with { Stage = "processing" };
+            return Continue(processing, JobKind.Poll, timeProvider.GetUtcNow().AddSeconds(30), PublicationState.Processing);
+        }
         var next = plan.Checkpoint with { Status = Snapshot(observed.Status), StatusCheckedAt = timeProvider.GetUtcNow(), Stage = "ready" };
-        return Progress(next, timeProvider.GetUtcNow());
+        return Continue(next, JobKind.Publish, timeProvider.GetUtcNow(), PublicationState.Ready);
     }
 
     private async Task<StepResult> PublishAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
@@ -878,9 +879,13 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         status.PrivacyStatus ?? "private", status.Embeddable, status.License, status.PublicStatsViewable,
         status.SelfDeclaredMadeForKids, status.ContainsSyntheticMedia);
 
-    private StepResult Progress(YouTubeCheckpoint checkpoint, DateTimeOffset? retryAt = null) =>
+    private StepResult Continue(
+        YouTubeCheckpoint checkpoint,
+        JobKind nextJobKind,
+        DateTimeOffset? dueAt = null,
+        PublicationState? observedState = null) =>
         new(StepOutcome.Pending, EffectCertainty.Confirmed, Checkpoint: JsonSerializer.Serialize(checkpoint),
-            RetryAt: retryAt ?? timeProvider.GetUtcNow(), ConsumesRetryBudget: false);
+            RetryAt: dueAt ?? timeProvider.GetUtcNow(), ObservedState: observedState, NextJobKind: nextJobKind);
 
     private static StepResult ProviderFailure(YouTubeProviderException ex) => ex.Retryable
         ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, FailureCategory: Classify(ex.SafeCode))
