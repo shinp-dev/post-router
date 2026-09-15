@@ -107,6 +107,11 @@ public sealed class CliTests
         await File.WriteAllTextAsync(manifest, """
 {"schemaVersion":1,"clientRequestId":"youtube-invalid","content":{"title":"Video title","video":"clip.mp4"},"targets":[{"account":"yt-main","provider":"youtube","visibility":"private","options":{}}]}
 """);
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        var previousKey = Environment.GetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY");
+        var key = new byte[32];
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", Convert.ToBase64String(key));
         try
         {
             var result = await InvokeAsync(["--data-dir", directory, "post", "--file", manifest]);
@@ -115,6 +120,8 @@ public sealed class CliTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", previousKey);
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try { Directory.Delete(directory, true); } catch (IOException) { }
         }
