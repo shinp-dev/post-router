@@ -9,7 +9,13 @@ namespace PostRouter.Cli;
 internal sealed record ManifestDto(int SchemaVersion, string? ClientRequestId, ContentDto? Content, ScheduleDto? Schedule, IReadOnlyList<TargetDto>? Targets);
 internal sealed record ContentDto(string? Text, string? Title, string? Video, IReadOnlyList<string>? Images);
 internal sealed record ScheduleDto(string At, string? TimeZone, int MaxLatenessSeconds = 900);
-internal sealed record TargetDto(string Account, string Provider = "fake", string Visibility = "public", int OptionsVersion = 1, JsonElement? Options = null);
+internal sealed record TargetDto(
+    string Account,
+    string Provider = "fake",
+    string Visibility = "public",
+    int OptionsVersion = 1,
+    JsonElement? Options = null,
+    string? ApprovalPolicy = null);
 
 internal static class ManifestReader
 {
@@ -30,9 +36,11 @@ internal static class ManifestReader
         {
             if (string.IsNullOrWhiteSpace(target.Account)) throw new InvalidDataException("Each target requires an account alias.");
             var provider = target.Provider.ToLowerInvariant();
-            if (provider is not "fake" and not "x") throw new InvalidDataException("Phase 2A supports the x provider and the test-only fake provider.");
+            if (provider is not "fake" and not "x" and not "youtube")
+                throw new InvalidDataException("Supported manifest providers are x, youtube, and the test-only fake provider.");
             if (provider == "fake" && !fakeEnabled) throw new InvalidDataException("The fake provider requires POST_ROUTER_PROFILE=test.");
             if (target.Options is { ValueKind: not JsonValueKind.Object }) throw new InvalidDataException("Target options must be a JSON object.");
+            _ = ParseApprovalPolicy(target.ApprovalPolicy);
         }
         var requestedSchedule = manifest.Schedule is null ? null : ParseSchedule(manifest.Schedule);
 
@@ -41,7 +49,7 @@ internal static class ManifestReader
         ContentKind kind;
         if (manifest.Content.Video is not null)
         {
-            if (manifest.Content.Images is { Count: > 0 }) throw new InvalidDataException("Video and images cannot be mixed in Phase 1.");
+            if (manifest.Content.Images is { Count: > 0 }) throw new InvalidDataException("Video and images cannot be mixed in one post.");
             var asset = await spool.ImportAsync(Resolve(baseDirectory, manifest.Content.Video), cancellationToken);
             if (asset.DetectedMime != "video/mp4") throw new InvalidDataException("content.video must be an MP4 file.");
             media.Add(asset);
@@ -52,7 +60,7 @@ internal static class ManifestReader
             foreach (var image in manifest.Content.Images)
             {
                 var asset = await spool.ImportAsync(Resolve(baseDirectory, image), cancellationToken);
-                if (asset.DetectedMime != "image/jpeg") throw new InvalidDataException("content.images must contain JPEG files in Phase 1.");
+                if (asset.DetectedMime != "image/jpeg") throw new InvalidDataException("content.images must contain JPEG files.");
                 media.Add(asset);
             }
             kind = ContentKind.ImageSet;
@@ -67,9 +75,17 @@ internal static class ManifestReader
             if (registered is null && provider != "fake") throw new InvalidDataException($"Account alias '{target.Account}' is not registered for provider '{provider}'.");
             var accountId = registered?.Id ?? StableAccountId(provider, target.Account);
             return new TargetIntent(accountId, provider, target.Visibility, $"{provider}-options/v1", target.OptionsVersion,
-                Canonicalize(target.Options), target.Account);
+                Canonicalize(target.Options), target.Account, ParseApprovalPolicy(target.ApprovalPolicy));
         }).ToArray();
         return new(manifest.ClientRequestId, new Content(Guid.NewGuid(), kind, manifest.Content.Text, manifest.Content.Title, media), targets, schedule);
+    }
+
+    private static ApprovalPolicy ParseApprovalPolicy(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return ApprovalPolicy.Automatic;
+        if (!Enum.TryParse<ApprovalPolicy>(value, ignoreCase: true, out var policy) || !Enum.IsDefined(policy))
+            throw new InvalidDataException("target.approvalPolicy must be Automatic or RequireApproval.");
+        return policy;
     }
 
     private static ScheduleIntent ParseSchedule(ScheduleDto schedule)
