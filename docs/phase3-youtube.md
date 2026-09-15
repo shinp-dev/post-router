@@ -93,20 +93,20 @@ CLIだけではなく、runtimeに登録するYouTube Adapter自身も`madeForKi
 
 registered runtimeでは`YouTubeResumeSafeAdapter`がresumable PUTをquery-first unitに包む。coreが`ResumeKnownHandle`のabandoned claimを再queueしても、再実行時にremote offsetを照会してからdataを送るため、crash後のbyte重複/欠落をlocal推測に依存しない。
 
-通常progressとfailure retry budgetを混同しない。成功したresumable progressとprocessing pollは`ConsumesRetryBudget=false`として、通信失敗等だけがfailure retry budgetを消費する。
+正常なworkflow進行とfailure retryを同じjobのattemptとして数えない。session開始成功、resumable progress、upload完了など次段階へ進める結果は、receipt/checkpointをcommitする同じtransactionで現在jobを完了し、新しい`Publish`または`Poll` jobを生成する。通信失敗等で同じ操作を再試行する場合だけ、現在jobをrequeueして共通failure retry上限を消費する。
 
 ### Processing
 
-既知video IDに対して`videos.list?part=status,processingDetails,suggestions`をpollする。
+既知video IDに対して`videos.list?part=status,processingDetails,suggestions`を`JobKind.Poll`でpollする。
 
-- processing / uploaded: Pendingとして再確認
-- processed + processing succeeded: 公開準備完了
+- processing / uploaded: 現在Poll jobを正常完了し、provider推奨間隔後の新しいPoll jobを生成する
+- processed + processing succeeded: 現在Poll jobを正常完了し、新しいPublish jobへ戻して公開準備完了とする
 - upload failed/rejected: `status.failureReason` / `status.rejectionReason`をsafe categoryへ正規化して停止
 - processing failed: `processingDetails.processingFailureReason`を第一原因とし、必要なら`suggestions.processingErrors[]`を補助にして停止
-- response/network failure: read-only pollとしてbackoff retry
-- first remote submissionから7日を超えてprocessingが完了しない場合: 無期限pollせず`NeedsAttention`
+- response/network failure: 同じPoll jobをread-only retryとしてbackoffし、共通failure retry上限を適用する
+- first remote submissionから7日を超えてprocessingが完了しない場合: poll回数ではなく経過時間で`NeedsAttention`へ止める
 
-processing pollは正常進行であり、publication failure retryとは区別する。恒久failureを自動full re-uploadへ戻さない。
+正常pollの回数そのものには上限を置かない。processing workflowの停止条件はprovider固有のelapsed deadlineで持ち、Phase 3AではYouTubeの7日deadlineだけを実装する。複数providerで共通性を確認するまで、core共通の最大poll時間は導入しない。恒久failureを自動full re-uploadへ戻さない。
 
 ### API error classification
 
