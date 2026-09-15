@@ -52,7 +52,7 @@ public sealed class YouTubeFailureMatrixTests
 
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
-        Assert.Equal(13, polls);
+        Assert.Equal(14, polls);
         Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
         await setup.Worker.DisposeAsync();
     }
