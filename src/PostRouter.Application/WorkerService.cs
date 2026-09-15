@@ -127,7 +127,7 @@ public sealed class WorkerService(
             {
                 result = ReplayableFailure(step, ex.GetType().Name, FailureCategory.Provider);
             }
-            if (result.Outcome == StepOutcome.Pending && result.RetryAt is null)
+            if (result.Outcome == StepOutcome.Pending && result.RetryAt is null && result.NextJobKind is null)
                 result = result with { RetryAt = _retryPolicy.NextAttempt(timeProvider.GetUtcNow(), item.Job.AttemptNo + 1) };
             await store.CommitResultAsync(item, prepared, result, timeProvider.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
         }
