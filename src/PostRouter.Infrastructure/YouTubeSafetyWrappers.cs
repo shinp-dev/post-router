@@ -178,19 +178,56 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
         var uploadStep = BuildStep(providerStep, uploadPlan, "youtube.upload.v1",
             StepEffect.UploadOnly, ReplaySafety.ResumeKnownHandle);
 
-        // Production is currently Windows-only. Keep a read/share-read handle open while the inner
-        // adapter verifies and reopens the spool object, preventing replacement or write access in
-        // the small verify-to-upload handoff window on Windows. The inner SHA/size verification is
-        // still authoritative and runs immediately before the data PUT.
-        await using var mediaGuard = TryOpenMediaGuard(uploadPlan.Asset);
-        return await _inner.ExecuteStepAsync(uploadStep, cancellationToken).ConfigureAwait(false);
+        FileStream? mediaGuard = null;
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                mediaGuard = new FileStream(uploadPlan.Asset.StorageRef, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    1, FileOptions.SequentialScan);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+                    Checkpoint: queryResult.Checkpoint,
+                    SafeError: "youtube_media_guard_unavailable",
+                    ObservedState: PublicationState.NeedsAttention,
+                    FailureCategory: FailureCategory.InvalidInput);
+            }
+        }
+
+        // Production is currently Windows-only. Holding a share-read-only handle while the inner
+        // adapter re-verifies and reopens the spool object narrows the verify-to-upload replacement
+        // window. If the guard cannot be acquired, fail closed rather than upload an unguarded path.
+        await using (mediaGuard)
+        {
+            var uploadResult = await _inner.ExecuteStepAsync(uploadStep, cancellationToken).ConfigureAwait(false);
+            return GuardMalformedUploadCompletion(uploadResult);
+        }
     }
 
     private async Task<StepResult> ExecuteGuardedQueryAsync(ProviderStep providerStep, CancellationToken cancellationToken)
     {
         if (!TryPlan(providerStep, out var plan, out var invalid)) return invalid!;
         var result = await _inner.ExecuteStepAsync(providerStep, cancellationToken).ConfigureAwait(false);
+        result = GuardMalformedUploadCompletion(result);
         return GuardAmbiguousSessionExpiry(plan, result);
+    }
+
+    private static StepResult GuardMalformedUploadCompletion(StepResult result)
+    {
+        if (!string.Equals(result.SafeError, "youtube_upload_success_malformed", StringComparison.Ordinal))
+            return result;
+
+        // A 2xx upload completion with an unusable body may already have created the private video.
+        // Without a video ID there is no safe reconciliation key, so never describe this as
+        // NoSideEffect or automatically create a replacement upload.
+        return result with
+        {
+            EffectCertainty = EffectCertainty.Ambiguous,
+            ObservedState = PublicationState.NeedsAttention,
+            FailureCategory = FailureCategory.Unknown,
+        };
     }
 
     private static StepResult GuardAmbiguousSessionExpiry(YouTubePlan plan, StepResult result)
@@ -392,24 +429,6 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
                 SafeError: "youtube_resume_plan_invalid", ObservedState: PublicationState.NeedsAttention,
                 FailureCategory: FailureCategory.InvalidInput);
             return false;
-        }
-    }
-
-    private static FileStream? TryOpenMediaGuard(MediaAsset asset)
-    {
-        if (!OperatingSystem.IsWindows() || !File.Exists(asset.StorageRef)) return null;
-        try
-        {
-            return new FileStream(asset.StorageRef, FileMode.Open, FileAccess.Read, FileShare.Read,
-                1, FileOptions.SequentialScan);
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return null;
         }
     }
 
