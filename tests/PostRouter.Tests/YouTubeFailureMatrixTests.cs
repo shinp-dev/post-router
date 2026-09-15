@@ -90,11 +90,8 @@ public sealed class YouTubeFailureMatrixTests
         var setup = await BuildAsync(context, http);
         var queued = await setup.Posts.EnqueueAsync(Intent(context, setup.Account.AccountId, "youtube-crash-resume", media.Path, media.Bytes));
 
-        // Persist the upload session first.
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
 
-        // Simulate a process dying after the resumable upload dispatch was durably prepared but
-        // before any receipt/checkpoint could be committed.
         var abandonedRun = await setup.Store.StartWorkerRunAsync(context.Time.GetUtcNow());
         var item = Assert.Single(await setup.Store.ClaimDueAsync(abandonedRun, context.Time.GetUtcNow(), 1));
         var step = await setup.Adapter.PlanNextStepAsync(item.Input, item.Checkpoint, default);
@@ -103,7 +100,6 @@ public sealed class YouTubeFailureMatrixTests
         Assert.NotNull(await setup.Store.PrepareDispatchAsync(item, step, context.Time.GetUtcNow()));
         await setup.Store.StopWorkerRunAsync(abandonedRun, context.Time.GetUtcNow());
 
-        // Recovery must query the server-owned offset before sending bytes again.
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(1, statusQueries);
         Assert.Equal(1, dataUploads);
@@ -208,7 +204,7 @@ public sealed class YouTubeFailureMatrixTests
         Assert.Equal(0, await setup.Worker.RunOnceAsync());
 
         var publication = Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications);
-        Assert.Equal(PublicationState.Failed, publication.State);
+        Assert.Equal(PublicationState.NeedsAttention, publication.State);
         Assert.StartsWith("youtube_processing_failed_", publication.SafeError, StringComparison.Ordinal);
         Assert.Equal(1, starts);
         Assert.Equal(1, uploads);
