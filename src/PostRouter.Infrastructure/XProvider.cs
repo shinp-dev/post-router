@@ -216,8 +216,13 @@ public sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) 
         var state = Base64Url(RandomNumberGenerator.GetBytes(32));
         var query = new Dictionary<string, string>
         {
-            ["response_type"] = "code", ["client_id"] = clientId, ["redirect_uri"] = redirectUri.AbsoluteUri,
-            ["scope"] = RequiredScope, ["state"] = state, ["code_challenge"] = challenge, ["code_challenge_method"] = "S256",
+            ["response_type"] = "code",
+            ["client_id"] = clientId,
+            ["redirect_uri"] = redirectUri.AbsoluteUri,
+            ["scope"] = RequiredScope,
+            ["state"] = state,
+            ["code_challenge"] = challenge,
+            ["code_challenge_method"] = "S256",
         };
         var encoded = string.Join("&", query.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
         return new(ProviderKey, clientId, redirectUri, new Uri($"https://x.com/i/oauth2/authorize?{encoded}"), state, verifier,
