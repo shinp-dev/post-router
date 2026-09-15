@@ -134,6 +134,143 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id WHERE p.post_id=$id O
         return accounts;
     }
 
+    public async Task<IReadOnlyList<AccountConnection>> GetAccountConnectionsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+SELECT a.id,a.provider_key,a.alias,a.status,a.remote_subject,a.display_name,a.client_id,a.scope,g.expires_at,
+  (SELECT p.safe_error FROM publications p
+   WHERE p.account_id=a.id AND p.state='NeedsAttention'
+     AND p.safe_error IN ('auth_required','credential_unavailable','x_auth_or_scope_rejected','x_token_refresh_rejected')
+   ORDER BY p.created_at DESC LIMIT 1)
+FROM accounts a LEFT JOIN auth_grants g ON g.id=a.auth_grant_id
+ORDER BY a.provider_key,a.alias
+""";
+        var accounts = new List<AccountConnection>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            accounts.Add(new(
+                Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                reader.IsDBNull(5) ? reader.GetString(2) : reader.GetString(5),
+                reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                reader.IsDBNull(8) ? null : ParseAt(reader.GetString(8)),
+                reader.IsDBNull(9) ? null : reader.GetString(9)));
+        return accounts;
+    }
+
+    public async Task<DashboardSummary> GetDashboardAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+SELECT
+  SUM(CASE WHEN p.state IN ('Pending','Preparing','Ready') AND s.mode='AtTime' AND s.due_at_utc>$now THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state IN ('Pending','Preparing','Ready') AND NOT (s.mode='AtTime' AND s.due_at_utc>$now) THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state IN ('Publishing','Processing','ScheduledRemote','CancelRequested','AwaitingUser') THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='Published' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state IN ('Failed','NeedsAttention') THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='Unknown' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='Cancelled' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='Expired' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='NeedsAttention' AND p.safe_error IN ('auth_required','credential_unavailable','x_auth_or_scope_rejected','x_token_refresh_rejected') THEN 1 ELSE 0 END)
+FROM publications p JOIN schedules s ON s.id=p.schedule_id
+""";
+        command.Parameters.AddWithValue("$now", At(now));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        _ = await reader.ReadAsync(cancellationToken);
+        return new(
+            ReadCount(reader, 0), ReadCount(reader, 1), ReadCount(reader, 2), ReadCount(reader, 3),
+            ReadCount(reader, 4), ReadCount(reader, 5), ReadCount(reader, 6), ReadCount(reader, 7),
+            ReadCount(reader, 8));
+    }
+
+    public async Task<IReadOnlyList<PublicationListItem>> GetPublicationsAsync(int limit, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = BuildPublicationQuery(connection, "", "LIMIT $limit");
+        command.Parameters.AddWithValue("$limit", limit);
+        var result = new List<PublicationListItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) result.Add(ReadPublicationListItem(reader));
+        return result;
+    }
+
+    public async Task<PublicationDetail?> GetPublicationDetailAsync(Guid publicationId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = BuildPublicationQuery(connection, "WHERE p.id=$publication", "");
+        command.Parameters.AddWithValue("$publication", Id(publicationId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        var summary = ReadPublicationListItem(reader);
+        var text = reader.IsDBNull(17) ? null : reader.GetString(17);
+        var visibility = reader.GetString(18);
+        var optionsSchema = reader.GetString(19);
+        var submitted = NullableAt(reader, 20);
+        var confirmed = NullableAt(reader, 21);
+        var providerError = reader.IsDBNull(22) ? null : reader.GetString(22);
+        var reconcileQueued = reader.GetInt64(23) != 0;
+        var retrySafe = reader.GetInt64(24) != 0 && summary.RemoteId is null;
+        return new(summary, text, visibility, optionsSchema, submitted, confirmed, providerError,
+            summary.SafeError, reconcileQueued, PublicationStateMachine.CanCancel(summary.PublicationState),
+            PublicationStateMachine.CanRetry(summary.PublicationState) && retrySafe,
+            PublicationStateMachine.CanReconcile(summary.PublicationState));
+    }
+
+    public async Task<bool> RequestRetryAsync(Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction();
+        var stateValue = await SqliteDatabase.ScalarAsync<string?>(connection, transaction,
+            "SELECT state FROM publications WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
+        if (stateValue is null) { transaction.Commit(); return false; }
+        var state = Enum.Parse<PublicationState>(stateValue);
+        if (!PublicationStateMachine.CanRetry(state)) { transaction.Commit(); return false; }
+        var safeAttempt = await SqliteDatabase.ScalarAsync<long>(connection, transaction, """
+SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id=a.job_id
+WHERE j.publication_id=$id AND a.effect_certainty IN ('NotSent','NoSideEffect')
+  AND a.started_at=(SELECT MAX(a2.started_at) FROM attempts a2 JOIN jobs j2 ON j2.id=a2.job_id WHERE j2.publication_id=$id)
+""", cancellationToken, ("$id", Id(publicationId))) == 1;
+        var remoteExists = await SqliteDatabase.ScalarAsync<long>(connection, transaction,
+            "SELECT COUNT(*) FROM remote_objects WHERE publication_id=$id", cancellationToken, ("$id", Id(publicationId))) != 0;
+        var activeExists = await SqliteDatabase.ScalarAsync<long>(connection, transaction,
+            "SELECT COUNT(*) FROM jobs WHERE publication_id=$id AND state IN ('Queued','Claimed','Blocked')", cancellationToken, ("$id", Id(publicationId))) != 0;
+        if (!safeAttempt || remoteExists || activeExists) { transaction.Commit(); return false; }
+        PublicationStateMachine.EnsureCanTransition(state, PublicationState.Pending);
+        await SqliteDatabase.ExecuteAsync(connection, transaction,
+            "UPDATE publications SET state='Pending',safe_error=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
+        await SqliteDatabase.ExecuteAsync(connection, transaction,
+            "INSERT INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($job,'Publish',$publication,100,'manual-retry','Queued',$due)", cancellationToken,
+            ("$job", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));
+        transaction.Commit();
+        return true;
+    }
+
+    public async Task<bool> RequestReconcileAsync(Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction();
+        var stateValue = await SqliteDatabase.ScalarAsync<string?>(connection, transaction,
+            "SELECT state FROM publications WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
+        if (stateValue is null || !PublicationStateMachine.CanReconcile(Enum.Parse<PublicationState>(stateValue)))
+        {
+            transaction.Commit();
+            return false;
+        }
+        var updated = await SqliteDatabase.ExecuteCountAsync(connection, transaction,
+            "UPDATE jobs SET due_at=$due,safe_error=NULL,generation=generation+1 WHERE publication_id=$id AND kind='Reconcile' AND state='Queued'",
+            cancellationToken, ("$due", At(now)), ("$id", Id(publicationId)));
+        if (updated == 0)
+            await SqliteDatabase.ExecuteAsync(connection, transaction,
+                "INSERT OR IGNORE INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($job,'Reconcile',$publication,110,'reconcile','Queued',$due)", cancellationToken,
+                ("$job", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));
+        transaction.Commit();
+        return true;
+    }
+
     public async Task<int> RequestCancelAsync(Guid postId, CancellationToken cancellationToken = default)
     {
         await using var connection = await database.OpenAsync(cancellationToken);
@@ -747,6 +884,50 @@ LEFT JOIN provider_checkpoints c ON c.publication_id=p.id WHERE j.id=$id
     private static async Task EnsureReconcileJobAsync(SqliteConnection connection, SqliteTransaction transaction, Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken) =>
         await SqliteDatabase.ExecuteAsync(connection, transaction, "INSERT OR IGNORE INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($id,'Reconcile',$publication,110,'reconcile','Queued',$due)", cancellationToken,
             ("$id", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));
+
+    private static SqliteCommand BuildPublicationQuery(SqliteConnection connection, string where, string limit)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = $"""
+SELECT p.post_id,p.id,p.provider_key,p.account_id,a.alias,
+  substr(COALESCE(content.text,''),1,160),p.state,s.mode,s.due_at_utc,p.created_at,p.published_at,
+  (SELECT provider_object_id FROM remote_objects r WHERE r.publication_id=p.id AND r.kind='final' ORDER BY r.observed_at DESC LIMIT 1),
+  j.kind,j.state,j.due_at,j.attempt_count,p.safe_error,
+  content.text,t.visibility,t.options_schema,p.first_submitted_at,p.confirmed_at,
+  (SELECT attempt.safe_error FROM attempts attempt JOIN jobs attempt_job ON attempt_job.id=attempt.job_id WHERE attempt_job.publication_id=p.id ORDER BY attempt.started_at DESC LIMIT 1),
+  EXISTS(SELECT 1 FROM jobs reconcile WHERE reconcile.publication_id=p.id AND reconcile.kind='Reconcile' AND reconcile.state IN ('Queued','Claimed','Blocked')),
+  EXISTS(SELECT 1 FROM attempts attempt JOIN jobs attempt_job ON attempt_job.id=attempt.job_id
+    WHERE attempt_job.publication_id=p.id AND attempt.effect_certainty IN ('NotSent','NoSideEffect')
+      AND attempt.started_at=(SELECT MAX(last_attempt.started_at) FROM attempts last_attempt JOIN jobs last_job ON last_job.id=last_attempt.job_id WHERE last_job.publication_id=p.id))
+FROM publications p
+JOIN posts post ON post.id=p.post_id
+JOIN contents content ON content.id=post.content_id
+JOIN targets t ON t.id=p.target_id
+JOIN schedules s ON s.id=p.schedule_id
+JOIN accounts a ON a.id=p.account_id
+LEFT JOIN jobs j ON j.id=(
+  SELECT candidate.id FROM jobs candidate WHERE candidate.publication_id=p.id
+  ORDER BY CASE candidate.state WHEN 'Claimed' THEN 0 WHEN 'Queued' THEN 1 WHEN 'Blocked' THEN 2 ELSE 3 END,
+    candidate.due_at DESC,candidate.id DESC LIMIT 1)
+{where}
+ORDER BY p.created_at DESC,p.id DESC
+{limit}
+""";
+        return command;
+    }
+
+    private static PublicationListItem ReadPublicationListItem(SqliteDataReader reader) => new(
+        Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), reader.GetString(2), Guid.Parse(reader.GetString(3)),
+        reader.GetString(4), reader.GetString(5), Enum.Parse<PublicationState>(reader.GetString(6)),
+        Enum.Parse<ScheduleMode>(reader.GetString(7)), ParseAt(reader.GetString(8)), ParseAt(reader.GetString(9)),
+        NullableAt(reader, 10), reader.IsDBNull(11) ? null : reader.GetString(11),
+        reader.IsDBNull(12) ? null : Enum.Parse<JobKind>(reader.GetString(12)),
+        reader.IsDBNull(13) ? null : Enum.Parse<JobState>(reader.GetString(13)),
+        NullableAt(reader, 14), reader.IsDBNull(15) ? 0 : reader.GetInt32(15),
+        reader.IsDBNull(16) ? null : reader.GetString(16));
+
+    private static int ReadCount(SqliteDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? 0 : checked((int)reader.GetInt64(ordinal));
 
     private static string Id(Guid id) => id.ToString("D");
     private static string At(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);

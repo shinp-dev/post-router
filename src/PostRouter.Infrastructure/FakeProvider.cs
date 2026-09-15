@@ -11,6 +11,9 @@ public sealed class FakeProvider : IProviderAdapter, IAuthProvider, IMetricsProv
     private int _publishCalls;
     private int _refreshCalls;
     public string ProviderKey => "fake";
+    public ProviderCapabilities Capabilities { get; } = new(
+        "fake", [ContentKind.TextOnly, ContentKind.ImageSet, ContentKind.Video], ["public"],
+        "fake-options/v1", 1, "{}", false, false);
     public bool RequiresConnectedAccount => false;
     public void Validate(Content content, TargetIntent target) { }
     public int PublishCalls => Volatile.Read(ref _publishCalls);
@@ -57,4 +60,6 @@ public sealed class ProviderRegistry(IEnumerable<IProviderAdapter> adapters) : I
 {
     private readonly Dictionary<string, IProviderAdapter> _adapters = adapters.ToDictionary(x => x.ProviderKey, StringComparer.OrdinalIgnoreCase);
     public IProviderAdapter GetRequired(string providerKey) => _adapters.TryGetValue(providerKey, out var adapter) ? adapter : throw new NotSupportedException($"Provider '{providerKey}' is not registered.");
+    public IReadOnlyList<ProviderCapabilities> GetCapabilities() =>
+        _adapters.Values.Select(adapter => adapter.Capabilities).OrderBy(item => item.ProviderKey, StringComparer.Ordinal).ToArray();
 }

@@ -275,6 +275,8 @@ internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider
 internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, TimeProvider timeProvider) : IProviderAdapter
 {
     public string ProviderKey => "x";
+    public ProviderCapabilities Capabilities { get; } = new(
+        "x", [ContentKind.TextOnly], ["public"], "x-options/v1", 1, "{}", true, true);
     public bool RequiresConnectedAccount => true;
 
     public void Validate(Content content, TargetIntent target)

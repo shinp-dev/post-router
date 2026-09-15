@@ -16,11 +16,12 @@ internal sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
 internal sealed class TestContext : IAsyncDisposable
 {
     private readonly AesGcmSecretProtector _protector;
-    private TestContext(string directory, ManualTimeProvider time, AesGcmSecretProtector protector, SqliteDatabase database, SqliteStore store, FileMaintenanceGate gate, FakeProvider provider, PostService posts, WorkerService worker)
+    private TestContext(string directory, ManualTimeProvider time, AesGcmSecretProtector protector, SqliteDatabase database, SqliteStore store, FileMaintenanceGate gate, FakeProvider provider, PostService posts, WorkerService worker, OperationsService operations)
     {
         Directory = directory; Time = time; _protector = protector; Database = database; Store = store; Gate = gate; Provider = provider; Posts = posts; Worker = worker;
         Stats = new(store, gate, new ProviderRegistry([provider]), time);
         Maintenance = new(new DatabaseMaintenance(database, gate, Path.Combine(directory, "spool")), store, time);
+        Operations = operations;
     }
     public string Directory { get; }
     public ManualTimeProvider Time { get; }
@@ -32,6 +33,7 @@ internal sealed class TestContext : IAsyncDisposable
     public WorkerService Worker { get; }
     public StatsService Stats { get; }
     public MaintenanceService Maintenance { get; }
+    public OperationsService Operations { get; }
     public Guid AccountId { get; } = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     public static async Task<TestContext> CreateAsync()
@@ -48,7 +50,8 @@ internal sealed class TestContext : IAsyncDisposable
         var providers = new ProviderRegistry([provider]);
         var posts = new PostService(store, gate, providers, time);
         var worker = new WorkerService(store, providers, new FileWorkerLockFactory(Path.Combine(directory, "worker.lock")), gate, time);
-        return new(directory, time, protector, database, store, gate, provider, posts, worker);
+        var operations = new OperationsService(store, gate, providers, posts, time);
+        return new(directory, time, protector, database, store, gate, provider, posts, worker, operations);
     }
 
     public CanonicalPostIntent Intent(string key = "release-a", string text = "hello", DateTimeOffset? due = null, TimeSpan? maxLateness = null) =>

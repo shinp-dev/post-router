@@ -1,16 +1,16 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
-    <ProjectReference Include="..\PostRouter.Gui\PostRouter.Gui.csproj" />
+    <ProjectReference Include="..\PostRouter.Application\PostRouter.Application.csproj" />
     <ProjectReference Include="..\PostRouter.Infrastructure\PostRouter.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.0.4" />
+    <EmbeddedResource Include="Web\**\*" />
   </ItemGroup>
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>Library</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

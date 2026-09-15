@@ -62,6 +62,13 @@
       "postrouter.domain": {
         "type": "Project"
       },
+      "postrouter.gui": {
+        "type": "Project",
+        "dependencies": {
+          "PostRouter.Application": "[1.0.0, )",
+          "PostRouter.Infrastructure": "[1.0.0, )"
+        }
+      },
       "postrouter.infrastructure": {
         "type": "Project",
         "dependencies": {

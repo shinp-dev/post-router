@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PostRouter.Cli\PostRouter.Cli.csproj" />
+    <ProjectReference Include="..\..\src\PostRouter.Gui\PostRouter.Gui.csproj" />
     <ProjectReference Include="..\..\src\PostRouter.Infrastructure\PostRouter.Infrastructure.csproj" />
   </ItemGroup>
 

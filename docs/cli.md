@@ -2,6 +2,8 @@
 
 提案仕様 v1 / 2026-09-14。コマンド名は `pub`、project/repository名はpost-router。名前衝突時は配布名post-router、alias pubとする。
 
+`pub gui [--port 43127] [--no-open]`で同じApplication Serviceを利用する人間向け操作盤を起動する。GUIはworkerを起動せず、CLIは引き続きAI/automation向けの決定的JSON interfaceとして維持する。
+
 ## コマンド
 
 | コマンド | 意味・副作用 |

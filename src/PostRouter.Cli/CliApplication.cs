@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PostRouter.Application;
+using PostRouter.Gui;
 using PostRouter.Infrastructure;
 
 namespace PostRouter.Cli;
@@ -29,7 +30,26 @@ public static class CliApplication
         root.Subcommands.Add(BuildDoctor(dataDirectory));
         root.Subcommands.Add(BuildDatabase(dataDirectory));
         root.Subcommands.Add(BuildAccount(dataDirectory));
+        root.Subcommands.Add(BuildGui(dataDirectory));
         return root.Parse(args).InvokeAsync();
+    }
+
+    private static Command BuildGui(Option<string?> dataDirectory)
+    {
+        var command = new Command("gui", "Open the local human operations console");
+        var port = new Option<int>("--port") { Description = "Loopback TCP port", DefaultValueFactory = _ => 43127 };
+        var noOpen = new Option<bool>("--no-open") { Description = "Do not open the default browser" };
+        command.Options.Add(port);
+        command.Options.Add(noOpen);
+        command.SetAction(async (result, token) =>
+        {
+            await using var host = await GuiApplication.StartAsync(new(
+                result.GetValue(dataDirectory), result.GetValue(port), !result.GetValue(noOpen)), token);
+            Console.Out.WriteLine($"post-router GUI: {host.Address.AbsoluteUri}");
+            await host.WaitForShutdownAsync(token);
+            return 0;
+        });
+        return command;
     }
 
     private static Command BuildPost(Option<string?> dataDirectory)
