@@ -1,0 +1,4 @@
+root = true
+
+[src/PostRouter.Infrastructure/YouTubeProvider.cs]
+dotnet_diagnostic.CA1822.severity = none
