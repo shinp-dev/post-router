@@ -293,7 +293,7 @@ public sealed class YouTubeFailureMatrixTests
         Assert.Equal(0, await setup.Worker.RunOnceAsync());
 
         var publication = Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications);
-        Assert.Equal(PublicationState.Failed, publication.State);
+        Assert.Equal(PublicationState.NeedsAttention, publication.State);
         Assert.Equal("youtube_upload_success_malformed", publication.SafeError);
         Assert.Equal(3, calls);
         await setup.Worker.DisposeAsync();
