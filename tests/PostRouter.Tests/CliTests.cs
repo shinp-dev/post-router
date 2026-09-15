@@ -1,5 +1,8 @@
 using System.Text.Json;
+using PostRouter.Application;
 using PostRouter.Cli;
+using PostRouter.Domain;
+using PostRouter.Infrastructure;
 
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
 
@@ -40,6 +43,85 @@ public sealed class CliTests
         finally
         {
             Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Manifest_accepts_youtube_video_and_require_approval()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-youtube-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var manifest = Path.Combine(directory, "youtube.json");
+        var video = Path.Combine(directory, "clip.mp4");
+        await File.WriteAllBytesAsync(video,
+            [0, 0, 0, 24, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'i', (byte)'s', (byte)'o', (byte)'m', 0, 0, 0, 0]);
+        await File.WriteAllTextAsync(manifest, """
+{"schemaVersion":1,"clientRequestId":"youtube-video","content":{"title":"Video title","text":"description","video":"clip.mp4"},"targets":[{"account":"yt-main","provider":"youtube","visibility":"public","approvalPolicy":"RequireApproval","options":{"madeForKids":false,"containsSyntheticMedia":true,"uploadNoticeAcknowledged":true}}]}
+""");
+
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        var previousKey = Environment.GetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY");
+        var key = new byte[32];
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", Convert.ToBase64String(key));
+        try
+        {
+            await using (var setupRuntime = await RuntimeFactory.CreateAsync(directory, new InMemoryMasterKeyStore(key)))
+            {
+                var expires = DateTimeOffset.UtcNow.AddHours(2);
+                var material = JsonSerializer.SerializeToUtf8Bytes(new TokenMaterial("access", "refresh", expires));
+                var blob = await setupRuntime.Store.PutAsync("auth-token", material);
+                _ = await setupRuntime.Store.SaveConnectedAccountAsync(new(
+                    "youtube", "yt-main", "channel-1", "YT Main", "desktop-client",
+                    "https://www.googleapis.com/auth/youtube.force-ssl", expires, blob));
+            }
+
+            var result = await InvokeAsync(["--data-dir", directory, "post", "--file", manifest]);
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            var publicationId = json.RootElement.GetProperty("result").GetProperty("publicationIds")[0].GetGuid();
+
+            await using var runtime = await RuntimeFactory.CreateAsync(directory, new InMemoryMasterKeyStore(key));
+            var approval = await runtime.Operations.PublicationApprovalAsync(publicationId);
+            Assert.Equal(ApprovalPolicy.RequireApproval, approval.Policy);
+            Assert.False(approval.Approved);
+            Assert.True(approval.CanApprove);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", previousKey);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Manifest_rejects_youtube_without_made_for_kids_and_notice_acknowledgement()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-youtube-policy-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var manifest = Path.Combine(directory, "youtube-invalid.json");
+        await File.WriteAllTextAsync(manifest, """
+{"schemaVersion":1,"clientRequestId":"youtube-invalid","content":{"title":"Video title","video":"clip.mp4"},"targets":[{"account":"yt-main","provider":"youtube","visibility":"private","options":{}}]}
+""");
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        var previousKey = Environment.GetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY");
+        var key = new byte[32];
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", Convert.ToBase64String(key));
+        try
+        {
+            var result = await InvokeAsync(["--data-dir", directory, "post", "--file", manifest]);
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("madeForKids", result.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", previousKey);
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try { Directory.Delete(directory, true); } catch (IOException) { }
         }

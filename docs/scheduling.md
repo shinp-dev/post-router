@@ -25,10 +25,12 @@ stateDiagram-v2
     Pending --> Preparing
     Preparing --> Ready
     Ready --> Publishing
+    Ready --> Processing
     Ready --> ScheduledRemote
     Publishing --> Processing
     Publishing --> Published
     Publishing --> Unknown
+    Processing --> Ready: provider processing complete
     Processing --> Published
     Processing --> Failed
     ScheduledRemote --> Published
@@ -52,7 +54,7 @@ stateDiagram-v2
 | 未送信のまま遅延期限超過 | Expired。勝手な翌日投稿をしない。同じ予約をretryして後から公開せず、新しい公開意図・時刻として再登録する |
 | 取消要求 | CancelRequested。未送信ならCancelled、remote操作が必要なら確認まで保留 |
 
-Processing/UnknownからFailedへ移すにはremote失敗の証拠が必要。管理上のpoll上限に達しただけならNeedsAttention。Unknown/NeedsAttentionでも後から公開が確認されればPublishedへ移す。公開履歴は削除しない。
+Processing/UnknownからFailedへ移すにはremote失敗の証拠が必要。provider固有のprocessing deadlineに達しただけならNeedsAttention。Unknown/NeedsAttentionでも後から公開が確認されればPublishedへ移す。公開履歴は削除しない。
 
 ## 永続queueと排他
 
@@ -118,7 +120,9 @@ Instagramはcontainer IDと確認できたprocessing statusを保存する。た
 
 ## Retryとrate limit
 
-初期policyはfull jitter、base 2秒、指数増加、上限5分。安全な同一段階の自動試行は最大8回、その後NeedsAttention。長期processing pollはこの回数から分離し、providerの推奨間隔に従い最大24時間で人間へ通知するが、その時点で失敗とは断定しない。
+初期policyはfull jitter、base 2秒、指数増加、上限5分。安全な同一段階の自動試行は最大8回、その後NeedsAttention。この上限は同じ操作のfailure retryに対する共通policyであり、正常なworkflow進行やprocessing pollの回数には適用しない。
+
+processing pollは成功するたびに現在Poll jobを完了し、次のdueAtを持つ新しいPoll jobを作る。poll HTTP/read自体が一時失敗した場合だけ同じPoll jobをretryし、上記failure retry上限を適用する。poll workflow全体の停止条件は回数ではなくprovider固有のelapsed deadlineで表す。複数providerで共通性を確認するまで、core共通の最大poll時間は固定しない。
 
 Retry-After、provider reset、quota resetがある場合はそれより早く再試行しない。bucketはprovider/app/account/endpointの必要な粒度で共有・永続化する。複数対象が429でも一斉に再試行しない。料金残高不足は入金まで自動retryしない。時計補正でrate limitを前倒ししない。
 

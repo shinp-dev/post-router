@@ -383,6 +383,7 @@ JOIN accounts account ON account.id=p.account_id
 WHERE j.state='Queued' AND j.due_at<=$now
   AND account.status IN ('Ready','Connected')
   AND ((j.kind='Publish' AND p.state IN ('Pending','Preparing','Ready','Publishing'))
+    OR (j.kind='Poll' AND p.state='Processing')
     OR (j.kind='Reconcile' AND p.state IN ('Unknown','Processing','CancelRequested')))
   AND NOT EXISTS (
     SELECT 1 FROM jobs active JOIN publications active_p ON active_p.id=active.publication_id
@@ -502,6 +503,27 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
                 {
                     await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='Cancelled',safe_error='cancelled_after_safe_result',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.Id)));
                     await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Cancelled',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
+                    break;
+                }
+                if (result.NextJobKind is { } nextJobKind)
+                {
+                    if (result.EffectCertainty == EffectCertainty.Ambiguous)
+                        throw new InvalidOperationException("Ambiguous result cannot advance the durable workflow.");
+                    if (nextJobKind is not (JobKind.Publish or JobKind.Poll))
+                        throw new InvalidOperationException($"Unsupported publication continuation kind '{nextJobKind}'.");
+
+                    var nextState = result.ObservedState ?? currentState;
+                    PublicationStateMachine.EnsureCanTransition(currentState, nextState);
+                    await SqliteDatabase.ExecuteAsync(connection, transaction,
+                        "UPDATE publications SET state=$state,safe_error=$error,failure_category=$category,generation=generation+1 WHERE id=$id", cancellationToken,
+                        ("$state", nextState.ToString()), ("$error", result.SafeError), ("$category", result.FailureCategory?.ToString()), ("$id", Id(item.Publication.Id)));
+                    await SqliteDatabase.ExecuteAsync(connection, transaction,
+                        "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
+                    await SqliteDatabase.ExecuteAsync(connection, transaction,
+                        "INSERT INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($id,$kind,$publication,$priority,$step,'Queued',$due)", cancellationToken,
+                        ("$id", Id(Guid.NewGuid())), ("$kind", nextJobKind.ToString()), ("$publication", Id(item.Publication.Id)),
+                        ("$priority", ContinuationPriority(nextJobKind)), ("$step", nextJobKind == JobKind.Poll ? "poll" : "continue"),
+                        ("$due", At(result.RetryAt ?? now)));
                     break;
                 }
                 if (item.Job.AttemptNo + 1 >= 8)
@@ -906,6 +928,13 @@ LEFT JOIN provider_checkpoints c ON c.publication_id=p.id WHERE j.id=$id
     private static async Task EnsureReconcileJobAsync(SqliteConnection connection, SqliteTransaction transaction, Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken) =>
         await SqliteDatabase.ExecuteAsync(connection, transaction, "INSERT OR IGNORE INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($id,'Reconcile',$publication,110,'reconcile','Queued',$due)", cancellationToken,
             ("$id", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));
+
+    private static int ContinuationPriority(JobKind kind) => kind switch
+    {
+        JobKind.Publish => 100,
+        JobKind.Poll => 80,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported publication continuation kind."),
+    };
 
     private static SqliteCommand BuildPublicationQuery(SqliteConnection connection, string where, string limit)
     {

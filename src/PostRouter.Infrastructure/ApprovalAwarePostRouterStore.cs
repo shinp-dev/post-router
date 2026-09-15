@@ -38,7 +38,9 @@ public sealed class ApprovalAwarePostRouterStore(
         return await inner.PrepareDispatchAsync(item, providerStep, now, cancellationToken).ConfigureAwait(false);
     }
 
-    public Task CommitResultAsync(PublicationWorkItem item, Attempt attempt, StepResult result, DateTimeOffset now, CancellationToken cancellationToken = default) => inner.CommitResultAsync(item, attempt, result, now, cancellationToken);
+    public Task CommitResultAsync(PublicationWorkItem item, Attempt attempt, StepResult result, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+        inner.CommitResultAsync(item, attempt, result, now, cancellationToken);
+
     public Task<bool> IsStopRequestedAsync(CancellationToken cancellationToken = default) => inner.IsStopRequestedAsync(cancellationToken);
     public Task RequestStopAsync(CancellationToken cancellationToken = default) => inner.RequestStopAsync(cancellationToken);
     public Task ClearStopRequestAsync(CancellationToken cancellationToken = default) => inner.ClearStopRequestAsync(cancellationToken);

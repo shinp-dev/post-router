@@ -121,17 +121,13 @@ public sealed class WorkerService(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                result = step.Effect is StepEffect.MayPublish or StepEffect.CreateRemoteObject
-                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: "operation_cancelled_after_dispatch", FailureCategory: FailureCategory.Unknown)
-                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: "operation_cancelled", FailureCategory: FailureCategory.Network);
+                result = ReplayableFailure(step, "operation_cancelled_after_dispatch", FailureCategory.Network);
             }
             catch (Exception ex)
             {
-                result = step.Effect is StepEffect.MayPublish or StepEffect.CreateRemoteObject
-                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: ex.GetType().Name, FailureCategory: FailureCategory.Unknown)
-                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.GetType().Name, FailureCategory: FailureCategory.Provider);
+                result = ReplayableFailure(step, ex.GetType().Name, FailureCategory.Provider);
             }
-            if (result.Outcome == StepOutcome.Pending && result.RetryAt is null)
+            if (result.Outcome == StepOutcome.Pending && result.RetryAt is null && result.NextJobKind is null)
                 result = result with { RetryAt = _retryPolicy.NextAttempt(timeProvider.GetUtcNow(), item.Job.AttemptNo + 1) };
             await store.CommitResultAsync(item, prepared, result, timeProvider.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
         }
@@ -140,6 +136,19 @@ public sealed class WorkerService(
             accountLock.Release();
             if (globalOwned) _global.Release();
         }
+    }
+
+    private static StepResult ReplayableFailure(ProviderStep step, string safeError, FailureCategory fallbackCategory)
+    {
+        return step.ReplaySafety switch
+        {
+            ReplaySafety.SafeRead => new(StepOutcome.Pending, EffectCertainty.NoSideEffect,
+                SafeError: safeError, FailureCategory: fallbackCategory),
+            ReplaySafety.SafeRepeatNoPublication or ReplaySafety.ResumeKnownHandle => new(StepOutcome.Pending, EffectCertainty.Ambiguous,
+                SafeError: safeError, FailureCategory: fallbackCategory),
+            _ => new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous,
+                SafeError: safeError, FailureCategory: FailureCategory.Unknown),
+        };
     }
 
     public ValueTask DisposeAsync()
