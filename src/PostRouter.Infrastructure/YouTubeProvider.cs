@@ -109,7 +109,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         try { response = await SendAsync(request, cancellationToken).ConfigureAwait(false); }
         catch (YouTubeProviderException ex) when (ex.Retryable)
         {
-            return new(false, null, 0, false, ex.SafeCode, RetryAt: timeProvider.GetUtcNow().AddSeconds(10));
+            return new(false, null, 0, false, ex.SafeCode, NeedsStatusQuery: true, RetryAt: timeProvider.GetUtcNow().AddSeconds(10));
         }
         using (response)
         {
@@ -213,6 +213,8 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         }
         using (response)
         {
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                return new(false, false, "youtube_rate_limited", RetryAt(response) ?? timeProvider.GetUtcNow().AddMinutes(15));
             if ((int)response.StatusCode >= 500) return new(false, true, "youtube_publish_server_uncertain");
             if (!response.IsSuccessStatusCode) return new(false, false, MapSafeCode(response.StatusCode, "youtube_publish_rejected"));
             var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
@@ -244,7 +246,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         catch (JsonException ex) { throw new YouTubeProviderException("youtube_token_malformed", false, ex); }
     }
 
-    private async Task<YouTubeUploadResult> CompletedUploadAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<YouTubeUploadResult> CompletedUploadAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
@@ -394,7 +396,7 @@ internal sealed record YouTubeVideoObservation(
 internal sealed record YouTubeUploadResult(
     bool Completed, string? VideoId, long NextOffset, bool SessionExpired, string? SafeError,
     bool NeedsStatusQuery = false, DateTimeOffset? RetryAt = null);
-internal sealed record YouTubeUpdateResult(bool Success, bool Ambiguous, string? SafeError);
+internal sealed record YouTubeUpdateResult(bool Success, bool Ambiguous, string? SafeError, DateTimeOffset? RetryAt = null);
 internal sealed record YouTubeStatusSnapshot(
     string PrivacyStatus,
     bool? Embeddable,
@@ -671,10 +673,11 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 SafeError: result.SafeError, RetryAt: result.RetryAt ?? timeProvider.GetUtcNow(),
                 FailureCategory: FailureCategory.Network);
         }
+        var queryFailed = query && result.SafeError is not null;
         var nextState = plan.Checkpoint with
         {
-            NextOffset = Math.Clamp(result.NextOffset, 0, plan.Asset.SizeBytes),
-            NeedsStatusQuery = result.NeedsStatusQuery,
+            NextOffset = queryFailed ? plan.Checkpoint.NextOffset : Math.Clamp(result.NextOffset, 0, plan.Asset.SizeBytes),
+            NeedsStatusQuery = queryFailed || result.NeedsStatusQuery,
             Stage = "uploading",
         };
         var normalProgress = result.SafeError is null && !result.NeedsStatusQuery;
@@ -682,7 +685,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
             result.NeedsStatusQuery ? EffectCertainty.Ambiguous : EffectCertainty.Confirmed,
             Checkpoint: JsonSerializer.Serialize(nextState), SafeError: result.SafeError,
             RetryAt: result.RetryAt ?? timeProvider.GetUtcNow(), FailureCategory: result.SafeError is null ? null : FailureCategory.Network,
-            ConsumesRetryBudget: !normalProgress || (query && result.SafeError is not null));
+            ConsumesRetryBudget: !normalProgress);
     }
 
     private async Task<StepResult> ObserveAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
@@ -739,6 +742,9 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         if (result.Ambiguous)
             return new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, Checkpoint: JsonSerializer.Serialize(plan.Checkpoint),
                 SafeError: result.SafeError, FailureCategory: FailureCategory.Unknown);
+        if (result.RetryAt is not null)
+            return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(plan.Checkpoint),
+                SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
         var observed = string.Equals(result.SafeError, "youtube_auth_or_scope_rejected", StringComparison.Ordinal)
             ? PublicationState.NeedsAttention
             : (PublicationState?)null;
