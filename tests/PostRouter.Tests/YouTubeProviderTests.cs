@@ -272,7 +272,7 @@ public sealed class YouTubeProviderTests
         var account = await SaveConnectionAsync(context);
         var adapter = new YouTubeProviderAdapter(auth, client, context.Time);
         var registry = new ProviderRegistry([adapter]);
-        var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time, context.Database);
+        var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time);
         var posts = new PostService(applicationStore, context.Gate, registry, context.Time);
         var worker = new WorkerService(applicationStore, registry,
             new FileWorkerLockFactory(Path.Combine(context.Directory, "youtube-worker.lock")), context.Gate, context.Time,
