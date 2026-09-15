@@ -221,7 +221,7 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id
         var providerError = reader.IsDBNull(22) ? null : reader.GetString(22);
         var reconcileQueued = reader.GetInt64(23) != 0;
         var retrySafe = reader.GetInt64(24) != 0 && summary.RemoteId is null;
-        var normalizedError = reader.IsDBNull(25) ? null : Enum.Parse<FailureCategory>(reader.GetString(25));
+        FailureCategory? normalizedError = reader.IsDBNull(25) ? null : Enum.Parse<FailureCategory>(reader.GetString(25));
         return new(summary, text, visibility, optionsSchema, submitted, confirmed, providerError,
             normalizedError, reconcileQueued, PublicationStateMachine.CanCancel(summary.PublicationState),
             PublicationStateMachine.CanRetry(summary.PublicationState) && retrySafe,
