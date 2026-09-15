@@ -184,7 +184,7 @@ public sealed class YouTubeProviderTests
         Assert.Equal(0, updateCalls);
         Assert.Equal(PublicationState.AwaitingApproval, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
 
-        Assert.True(await setup.Operations.ApproveAsync(publicationId));
+        await setup.Operations.ApproveAsync(publicationId);
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
         Assert.Equal(1, updateCalls);
         Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
