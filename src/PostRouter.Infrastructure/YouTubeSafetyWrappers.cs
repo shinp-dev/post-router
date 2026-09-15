@@ -338,10 +338,9 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
             !string.Equals(observed.ProcessingDetails?.ProcessingStatus, "succeeded", StringComparison.Ordinal))
         {
             var processing = plan.Checkpoint with { Stage = "processing" };
-            return new(StepOutcome.Pending, EffectCertainty.NoSideEffect,
-                Checkpoint: JsonSerializer.Serialize(processing), SafeError: "youtube_processing_regressed",
-                RetryAt: _timeProvider.GetUtcNow().AddSeconds(30), FailureCategory: FailureCategory.Provider,
-                ConsumesRetryBudget: false);
+            return new(StepOutcome.Pending, EffectCertainty.Confirmed,
+                Checkpoint: JsonSerializer.Serialize(processing), RetryAt: _timeProvider.GetUtcNow().AddSeconds(30),
+                ObservedState: PublicationState.Processing, NextJobKind: JobKind.Poll);
         }
 
         var snapshot = new YouTubeStatusSnapshot(
@@ -358,7 +357,8 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
             StatusCheckedAt = _timeProvider.GetUtcNow(),
         };
         return new(StepOutcome.Pending, EffectCertainty.Confirmed,
-            Checkpoint: JsonSerializer.Serialize(ready), RetryAt: _timeProvider.GetUtcNow(), ConsumesRetryBudget: false);
+            Checkpoint: JsonSerializer.Serialize(ready), RetryAt: _timeProvider.GetUtcNow(),
+            ObservedState: PublicationState.Ready, NextJobKind: JobKind.Publish);
     }
 
     private async Task<StepResult> RefreshStatusThroughInnerAsync(
@@ -388,19 +388,11 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
         }
     }
 
-    public async Task<StepResult> ReconcileAsync(
+    public Task<StepResult> ReconcileAsync(
         ProviderPublication input,
         string? checkpoint,
-        CancellationToken cancellationToken)
-    {
-        var result = await _inner.ReconcileAsync(input, checkpoint, cancellationToken).ConfigureAwait(false);
-        // A visibility update that remains unobserved should not poll forever. There is no repost
-        // risk because reconciliation is read-only; after the normal retry budget the item becomes
-        // NeedsAttention for a human decision.
-        return string.Equals(result.SafeError, "youtube_publish_not_observed", StringComparison.Ordinal)
-            ? result with { ConsumesRetryBudget = true }
-            : result;
-    }
+        CancellationToken cancellationToken) =>
+        _inner.ReconcileAsync(input, checkpoint, cancellationToken);
 
     private static ProviderStep BuildStep(
         ProviderStep source,
