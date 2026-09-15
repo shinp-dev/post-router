@@ -32,8 +32,8 @@ public static class PublicationStateMachine
         PublicationState.Publishing or PublicationState.Processing or PublicationState.ScheduledRemote or
         PublicationState.AwaitingUser or PublicationState.NeedsAttention;
 
-    public static bool CanRetry(PublicationState state) =>
-        CanTransition(state, PublicationState.Pending);
+    public static bool CanRetry(PublicationState state) => state == PublicationState.Failed ||
+        state == PublicationState.NeedsAttention && CanTransition(state, PublicationState.Failed);
 
     public static bool CanReconcile(PublicationState state) =>
         state is PublicationState.Unknown or PublicationState.Processing or PublicationState.CancelRequested;

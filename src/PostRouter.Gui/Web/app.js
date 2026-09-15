@@ -56,7 +56,7 @@ async function refreshAll() {
 function renderDashboard(data) {
   const labels = [
     ["Scheduled", data.scheduled, ""], ["Pending", data.pending, ""], ["Processing", data.processing, ""],
-    ["Published", data.published, ""], ["Failed", data.failed, "alert"], ["Unknown", data.unknown, "unknown"],
+    ["Published", data.published, ""], ["Failed", data.failed, "alert"], ["Needs attention", data.needsAttention, "alert"], ["Unknown", data.unknown, "unknown"],
     ["Cancelled", data.cancelled, ""], ["Expired", data.expired, ""], ["Auth error", data.authenticationErrors, "alert"]
   ];
   const summary = byId("summary"); summary.replaceChildren();
@@ -170,8 +170,21 @@ async function accountAction(id, action) {
 }
 
 async function reconnect(id) {
-  try { const result = await request(`/api/accounts/${id}/reconnect`, { method: "POST", body: "{}" }); window.open(result.authorizationUrl, "_blank", "noopener"); showNotice("認証画面を開きました。"); }
-  catch (error) { showNotice(error.message, true); }
+  const popup = prepareAuthorizationWindow();
+  try { const result = await request(`/api/accounts/${id}/reconnect`, { method: "POST", body: "{}" }); if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。"); }
+  catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
+}
+
+function prepareAuthorizationWindow() {
+  const popup = window.open("about:blank", "post-router-oauth");
+  if (popup) popup.opener = null;
+  return popup;
+}
+
+function openAuthorization(popup, url) {
+  if (popup) { popup.location.replace(url); return true; }
+  showNotice("ポップアップがブロックされました。再度認証を開始してください。", true);
+  return false;
 }
 
 function confirmAction(title, message, action) {
@@ -201,11 +214,12 @@ byId("post-form").addEventListener("submit", async event => {
 
 byId("connect-form").addEventListener("submit", async event => {
   event.preventDefault();
+  const popup = prepareAuthorizationWindow();
   try {
     const body = { provider: byId("connect-provider").value, clientId: byId("client-id").value, alias: byId("account-alias").value || null };
     const result = await request("/api/accounts/connect", { method: "POST", body: JSON.stringify(body) });
-    window.open(result.authorizationUrl, "_blank", "noopener"); showNotice("認証画面を開きました。完了後に更新してください。");
-  } catch (error) { showNotice(error.message, true); }
+    if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。完了後に更新してください。");
+  } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
 });
 
 (async () => {

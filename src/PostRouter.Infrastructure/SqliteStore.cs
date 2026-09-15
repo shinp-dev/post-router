@@ -167,11 +167,12 @@ ORDER BY a.provider_key,a.alias
         await using var command = connection.CreateCommand();
         command.CommandText = """
 SELECT
-  SUM(CASE WHEN p.state IN ('Pending','Preparing','Ready') AND s.mode='AtTime' AND s.due_at_utc>$now THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='ScheduledRemote' OR (p.state IN ('Pending','Preparing','Ready') AND s.mode='AtTime' AND s.due_at_utc>$now) THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state IN ('Pending','Preparing','Ready') AND NOT (s.mode='AtTime' AND s.due_at_utc>$now) THEN 1 ELSE 0 END),
-  SUM(CASE WHEN p.state IN ('Publishing','Processing','ScheduledRemote','CancelRequested','AwaitingUser') THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state IN ('Publishing','Processing','CancelRequested','AwaitingUser') THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Published' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN p.state IN ('Failed','NeedsAttention') THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='Failed' THEN 1 ELSE 0 END),
+  SUM(CASE WHEN p.state='NeedsAttention' THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Unknown' THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Cancelled' THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Expired' THEN 1 ELSE 0 END),
@@ -184,7 +185,7 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id
         return new(
             ReadCount(reader, 0), ReadCount(reader, 1), ReadCount(reader, 2), ReadCount(reader, 3),
             ReadCount(reader, 4), ReadCount(reader, 5), ReadCount(reader, 6), ReadCount(reader, 7),
-            ReadCount(reader, 8));
+            ReadCount(reader, 8), ReadCount(reader, 9));
     }
 
     public async Task<IReadOnlyList<PublicationListItem>> GetPublicationsAsync(int limit, CancellationToken cancellationToken = default)
@@ -231,14 +232,23 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id
         if (!PublicationStateMachine.CanRetry(state)) { transaction.Commit(); return false; }
         var safeAttempt = await SqliteDatabase.ScalarAsync<long>(connection, transaction, """
 SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id=a.job_id
-WHERE j.publication_id=$id AND a.effect_certainty IN ('NotSent','NoSideEffect')
-  AND a.started_at=(SELECT MAX(a2.started_at) FROM attempts a2 JOIN jobs j2 ON j2.id=a2.job_id WHERE j2.publication_id=$id)
+WHERE j.publication_id=$id AND j.kind='Publish' AND a.effect_certainty IN ('NotSent','NoSideEffect')
+  AND a.started_at=(SELECT MAX(a2.started_at) FROM attempts a2 JOIN jobs j2 ON j2.id=a2.job_id WHERE j2.publication_id=$id AND j2.kind='Publish')
 """, cancellationToken, ("$id", Id(publicationId))) == 1;
+        var ambiguousAttempt = await SqliteDatabase.ScalarAsync<long>(connection, transaction, """
+SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id=a.job_id
+WHERE j.publication_id=$id AND j.kind='Publish' AND a.effect_certainty='Ambiguous'
+""", cancellationToken, ("$id", Id(publicationId))) != 0;
         var remoteExists = await SqliteDatabase.ScalarAsync<long>(connection, transaction,
             "SELECT COUNT(*) FROM remote_objects WHERE publication_id=$id", cancellationToken, ("$id", Id(publicationId))) != 0;
         var activeExists = await SqliteDatabase.ScalarAsync<long>(connection, transaction,
             "SELECT COUNT(*) FROM jobs WHERE publication_id=$id AND state IN ('Queued','Claimed','Blocked')", cancellationToken, ("$id", Id(publicationId))) != 0;
-        if (!safeAttempt || remoteExists || activeExists) { transaction.Commit(); return false; }
+        if (!safeAttempt || ambiguousAttempt || remoteExists || activeExists) { transaction.Commit(); return false; }
+        if (state == PublicationState.NeedsAttention)
+        {
+            PublicationStateMachine.EnsureCanTransition(state, PublicationState.Failed);
+            state = PublicationState.Failed;
+        }
         PublicationStateMachine.EnsureCanTransition(state, PublicationState.Pending);
         PublicationStateMachine.EnsureCanTransition(PublicationState.Pending, PublicationState.Ready);
         await SqliteDatabase.ExecuteAsync(connection, transaction,
@@ -893,13 +903,15 @@ LEFT JOIN provider_checkpoints c ON c.publication_id=p.id WHERE j.id=$id
 SELECT p.post_id,p.id,p.provider_key,p.account_id,a.alias,
   substr(COALESCE(content.text,''),1,160),p.state,s.mode,s.due_at_utc,p.created_at,p.published_at,
   (SELECT provider_object_id FROM remote_objects r WHERE r.publication_id=p.id AND r.kind='final' ORDER BY r.observed_at DESC LIMIT 1),
-  j.kind,j.state,j.due_at,j.attempt_count,p.safe_error,
+  j.kind,j.state,j.due_at,(SELECT COUNT(*) FROM attempts all_attempts JOIN jobs all_jobs ON all_jobs.id=all_attempts.job_id WHERE all_jobs.publication_id=p.id),p.safe_error,
   content.text,t.visibility,t.options_schema,p.first_submitted_at,p.confirmed_at,
   (SELECT attempt.safe_error FROM attempts attempt JOIN jobs attempt_job ON attempt_job.id=attempt.job_id WHERE attempt_job.publication_id=p.id ORDER BY attempt.started_at DESC LIMIT 1),
   EXISTS(SELECT 1 FROM jobs reconcile WHERE reconcile.publication_id=p.id AND reconcile.kind='Reconcile' AND reconcile.state IN ('Queued','Claimed','Blocked')),
-  EXISTS(SELECT 1 FROM attempts attempt JOIN jobs attempt_job ON attempt_job.id=attempt.job_id
-    WHERE attempt_job.publication_id=p.id AND attempt.effect_certainty IN ('NotSent','NoSideEffect')
-      AND attempt.started_at=(SELECT MAX(last_attempt.started_at) FROM attempts last_attempt JOIN jobs last_job ON last_job.id=last_attempt.job_id WHERE last_job.publication_id=p.id))
+  (EXISTS(SELECT 1 FROM attempts attempt JOIN jobs attempt_job ON attempt_job.id=attempt.job_id
+    WHERE attempt_job.publication_id=p.id AND attempt_job.kind='Publish' AND attempt.effect_certainty IN ('NotSent','NoSideEffect')
+      AND attempt.started_at=(SELECT MAX(last_attempt.started_at) FROM attempts last_attempt JOIN jobs last_job ON last_job.id=last_attempt.job_id WHERE last_job.publication_id=p.id AND last_job.kind='Publish'))
+   AND NOT EXISTS(SELECT 1 FROM attempts ambiguous JOIN jobs ambiguous_job ON ambiguous_job.id=ambiguous.job_id
+     WHERE ambiguous_job.publication_id=p.id AND ambiguous_job.kind='Publish' AND ambiguous.effect_certainty='Ambiguous'))
 FROM publications p
 JOIN posts post ON post.id=p.post_id
 JOIN contents content ON content.id=post.content_id

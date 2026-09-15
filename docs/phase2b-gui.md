@@ -16,7 +16,7 @@ GUIはSQLite table、vault、X Adapter、HTTP clientへ直接アクセスしな�
 
 ## 画面と操作
 
-- Dashboard: Scheduled、Pending、Processing、Published、Failed、Unknown、Cancelled、Expired、認証エラーと接続済みaccount
+- Dashboard: Scheduled、Pending、Processing、Published、Failed、NeedsAttention、Unknown、Cancelled、Expired、認証エラーと接続済みaccount
 - 投稿作成: capabilityがtextを許す接続済みaccount、本文、即時/予約、enqueue
 - 投稿一覧/詳細: raw Publication/Job state、予定、attempt、remote ID、安全化済みerror、timestamp
 - 操作: Domainが許可するcancel、Failedかつ副作用なしと確認できる場合だけretry、Unknown等へのread-only Reconcile
@@ -56,7 +56,7 @@ pub gui --port 43127 --no-open
 - safe manual retry
 - Reconcileの即時queue要求
 
-retryはDomain上の`Failed -> Pending -> Ready`を順に検証し、直近Attemptが`NotSent`/`NoSideEffect`、remote objectなし、active jobなしの場合だけ同一transactionで再開する。Unknownからretryする経路はない。
+retryはDomain上の`Failed -> Pending -> Ready`、または`NeedsAttention -> Failed -> Pending -> Ready`を順に検証し、直近publish Attemptが`NotSent`/`NoSideEffect`、過去にAmbiguousなし、remote objectなし、active jobなしの場合だけ同一transactionで再開する。Unknownからretryする経路はない。
 
 ## 検証境界
 

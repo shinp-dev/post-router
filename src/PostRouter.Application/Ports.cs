@@ -38,8 +38,8 @@ public sealed record ProviderCapabilities(
     string OptionsSchema, int OptionsVersion, string DefaultOptionsJson,
     bool InteractiveAuthentication, bool Revoke);
 public sealed record DashboardSummary(
-    int Scheduled, int Pending, int Processing, int Published, int Failed, int Unknown,
-    int Cancelled, int Expired, int AuthenticationErrors);
+    int Scheduled, int Pending, int Processing, int Published, int Failed, int NeedsAttention,
+    int Unknown, int Cancelled, int Expired, int AuthenticationErrors);
 public sealed record PublicationListItem(
     Guid PostId, Guid PublicationId, string Provider, Guid AccountId, string AccountAlias,
     string ContentPreview, PublicationState PublicationState, ScheduleMode ScheduleMode,

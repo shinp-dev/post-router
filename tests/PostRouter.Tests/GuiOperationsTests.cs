@@ -67,6 +67,32 @@ public sealed class GuiOperationsTests
     }
 
     [Fact]
+    public async Task Safe_needs_attention_can_retry_but_ambiguous_history_cannot()
+    {
+        await using var context = await TestContext.CreateAsync();
+        context.Provider.QueuePublish(new StepResult(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+            SafeError: "auth_required", ObservedState: PublicationState.NeedsAttention));
+        var queued = await context.Posts.EnqueueAsync(context.Intent("gui-auth-retry"));
+        _ = await context.Worker.RunOnceAsync();
+        var publicationId = Assert.Single(queued.PublicationIds);
+
+        Assert.True((await context.Operations.PublicationAsync(publicationId))!.CanRetry);
+        await context.Operations.RetryAsync(publicationId);
+        _ = await context.Worker.RunOnceAsync();
+        Assert.Equal(PublicationState.Published, (await context.Operations.PublicationAsync(publicationId))!.Summary.PublicationState);
+
+        context.Provider.QueuePublish(new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: "response_lost"));
+        context.Provider.QueueReconcile(new StepResult(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+            SafeError: "manual_attention", ObservedState: PublicationState.NeedsAttention));
+        var ambiguous = await context.Posts.EnqueueAsync(context.Intent("gui-ambiguous-attention"));
+        _ = await context.Worker.RunOnceAsync();
+        _ = await context.Worker.RunOnceAsync();
+        var ambiguousId = Assert.Single(ambiguous.PublicationIds);
+        Assert.False((await context.Operations.PublicationAsync(ambiguousId))!.CanRetry);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => context.Operations.RetryAsync(ambiguousId));
+    }
+
+    [Fact]
     public async Task Enqueue_text_resolves_provider_from_account_and_rejects_unknown_account()
     {
         await using var context = await TestContext.CreateAsync();
