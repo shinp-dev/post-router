@@ -40,8 +40,10 @@ Capabilitiesのキャッシュは助言であり認可証明ではない。enque
 - stepKey: 同じoperationを識別する安定キー。
 - effect: ReadOnly / UploadOnly / CreateRemoteObject / MayPublish / UpdateExisting / DeleteExisting。
 - earliestAt / latestAt、estimatedCost、timeout、rateLimitBucket。
-- replaySafety: SafeRead / ResumeKnownHandle / IdempotentExistingObject / NotReplayable。
+- replaySafety: SafeRead / SafeRepeatNoPublication / ResumeKnownHandle / IdempotentExistingObject / NotReplayable。
 - opaque request planと次checkpoint schema。
+
+`SafeRepeatNoPublication`は、再実行により孤児remote objectや重複uploadが発生し得ても、公開そのものは起こらないstepにだけ使う。Xの画像uploadのように公開境界が後続の別stepにある場合、応答喪失後はuploadを再実行してよい。一方、Post作成や公開を開始し得る操作には使用しない。
 
 汎用schedulerが内容を読めないopaque planを無検証で実行するのではない。署名やコード実行を許すDSLはなく、adapter内部で生成した型付き操作だけ。planはsecretを含む可能性があり、ログやCLIへ返さない。
 
@@ -61,10 +63,12 @@ ReconcileResultはFound（証拠付きIDと状態）/ ConfirmedAbsent（対象op
 
 | Provider | 段階 | 決定的な公開境界 |
 | --- | --- | --- |
-| X | media init→chunks→finalize/status→Post create→lookup | POST /2/tweets |
+| X | 画像: simple upload→期限付きmedia ID保存→Post create→lookup。動画: media init→chunks→finalize/status→Post create→lookup | POST /2/tweets |
 | YouTube | resumable session→private upload→ID保存→status updateで公開/予約→poll | ID既知の公開/予約更新。private動画作成にも重複risk |
 | Instagram | staging/rupload→container ID保存→status→media_publish→公開確認 | media_publish。container作成は公開成功ではない |
 | TikTok（将来条件付き） | creator/consent→initでpublish_id保存→transfer→status | FILE_UPLOAD最終chunk、またはPULL_FROM_URL initが公開を開始し得る |
+
+Xのmedia IDには期限があるため、checkpointはIDだけでなく有効期限も保持する。公開step直前に期限切れまたは期限間近なら、公開を試みず安全なupload stepへ戻す。旧形式・壊れたcheckpointも公開済みの証拠として扱わず、画像uploadから再構築する。
 
 TikTokを「uploadは常に副作用なし」と扱わない。YouTube native予約とlocal公開を並走させない。Instagramのmedia_publish後にresponseを失った場合、container statusやfinal Media IDの安全な復旧能力はG-IGで確認するまでUnknownとして扱う。確認済みのoperation-bound証拠なしに再publish・新container作成をしない。
 
