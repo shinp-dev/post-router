@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "clientRequestId": "x-text-20260915-a",
+  "content": {
+    "text": "post-router Phase 2A test"
+  },
+  "targets": [
+    {
+      "account": "x-main",
+      "provider": "x",
+      "visibility": "public",
+      "optionsVersion": 1,
+      "options": {}
+    }
+  ]
+}

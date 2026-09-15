@@ -10,9 +10,11 @@ public sealed class WorkerService(
     IWorkerLockFactory workerLockFactory,
     IMaintenanceGate maintenanceGate,
     TimeProvider timeProvider,
-    IRetryPolicy? retryPolicy = null) : IAsyncDisposable
+    IRetryPolicy? retryPolicy = null,
+    IAccountOperationLockFactory? accountOperationLocks = null) : IAsyncDisposable
 {
     private readonly IRetryPolicy _retryPolicy = retryPolicy ?? new FullJitterRetryPolicy();
+    private readonly IAccountOperationLockFactory _accountOperationLocks = accountOperationLocks ?? new NoOpAccountOperationLockFactory();
     private readonly SemaphoreSlim _global = new(2, 2);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _accountLocks = new(StringComparer.Ordinal);
 
@@ -94,6 +96,7 @@ public sealed class WorkerService(
         var globalOwned = false;
         try
         {
+            await using var crossProcessAccountLock = await _accountOperationLocks.AcquireAsync(item.Publication.AccountId, cancellationToken).ConfigureAwait(false);
             await _global.WaitAsync(cancellationToken).ConfigureAwait(false);
             globalOwned = true;
             var adapter = providers.GetRequired(item.Publication.ProviderKey);
@@ -157,4 +160,11 @@ public sealed class FullJitterRetryPolicy : IRetryPolicy
         var delayMilliseconds = RandomNumberGenerator.GetInt32(checked((int)ceilingMilliseconds + 1));
         return now.AddMilliseconds(delayMilliseconds);
     }
+}
+
+internal sealed class NoOpAccountOperationLockFactory : IAccountOperationLockFactory
+{
+    public ValueTask<IAccountOperationLock> AcquireAsync(Guid accountId, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<IAccountOperationLock>(new NoOpLock());
+    private sealed class NoOpLock : IAccountOperationLock { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
 }

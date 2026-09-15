@@ -2,11 +2,11 @@
 
 人間が用意したコンテンツを、公式APIで配信・予約し、結果を回収する単一ユーザー向けCLI。
 
-**状態: Phase 1 Core + SQLite + Fake Provider 実装済み / 2026-09-15。X / YouTube / Instagram / TikTokの本番Adapterは未実装です。**
+**状態: Phase 2A。Phase 1 durable coreに、X text-only Provider Adapterを実装済み / 2026-09-15。実credentialを使う受入確認は未実施です。**
 
 Phase 1は配信基盤の不変条件を実装・検証する段階であり、SNSへ通信しない。Fake Providerは `POST_ROUTER_PROFILE=test` を明示した場合だけ登録され、通常profileでFake結果を本番公開済みとして扱う経路はない。
 
-## Phase 1 quick start
+## Phase 2A quick start
 
 .NET 10 SDKを用意し、依存関係をlock fileどおり復元する。
 
@@ -22,6 +22,18 @@ dotnet run --project src/PostRouter.Cli -- --data-dir ./.local queue
 ```
 
 Phase 1で実装済みの主な操作は `account list`、`post/status/cancel`、`queue`、`worker once/run/stop/install/start/status/uninstall`、`stats sync/show/purge-expired`、`doctor`、`db backup/check/restore` と復元後の `status/suppress/release`。`worker install` 系はWindowsの同一ユーザーTask Schedulerを利用する。
+
+X Native AppをDeveloper Consoleで作成し、OAuth 2.0 callbackを正確に登録してから接続する。Native Appではclient secretを使用しない。
+
+```powershell
+pub account connect x --client-id <client-id> --redirect-uri http://127.0.0.1:8765/callback --alias x-main
+pub account list
+pub post --file contracts/examples/release.x-text.json
+pub worker once
+pub post status <post-id>
+```
+
+認証を外す場合は`account disconnect --account <id>`、X側も失効する場合は`account revoke --account <id>`。どちらも投稿履歴とqueueを削除しない。再接続は`account reconnect --account <id> --redirect-uri <registered-loopback-uri>`で、同じX user IDだけを許可する。詳細と検証状態は[Phase 2A X](docs/phase2a-x.md)を参照。
 
 ## 設計上の結論
 
@@ -48,7 +60,7 @@ pub stats show --post <post-id> --layout provider-columns
 pub doctor --online --json
 ```
 
-以下はPhase 2以降の目標UXであり、まだ実行できない。本番用 `release.json` の仕様は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
+X text-only以外はPhase 2B以降の目標UXであり、まだ実行できない。本番用 `release.json` の仕様は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
 
 `--at` は希望公開時刻。YouTubeは事前アップロード後のnative予約、X/Instagramはローカル実行を使う。厳密な同時公開、電源OFF中のローカル投稿、ネットワーク越しのexactly-onceは保証しない。成否不明時は照合を優先し、自動再投稿しない。
 
@@ -79,5 +91,6 @@ pub doctor --online --json
 | [実装計画](docs/implementation-plan.md) | Phase、外部条件、人間の準備 |
 | [最終設計監査](docs/design-review.md) | 指摘、修正、残留リスク |
 | [Phase 1実装監査](docs/phase1-review.md) | 実装境界、自動試験、実機gate |
+| [Phase 2A X](docs/phase2a-x.md) | X text投稿、OAuth、解除、二重投稿境界、検証状態 |
 
 公式APIの調査と設計判断は区別する。Instagramは公式本文の一部取得に制限があり、細部の未確認事項をAPI調査書のG-IGに明記した。設計完了は審査通過・本番動作確認を意味しない。

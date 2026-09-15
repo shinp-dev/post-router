@@ -15,10 +15,9 @@ internal static class ManifestReader
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };
 
-    public static async Task<CanonicalPostIntent> ReadAsync(string path, SpoolStore spool, TimeProvider timeProvider, CancellationToken cancellationToken)
+    public static async Task<CanonicalPostIntent> ReadAsync(string path, SpoolStore spool, IReadOnlyList<Account> accounts, TimeProvider timeProvider, CancellationToken cancellationToken)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE"), "test", StringComparison.Ordinal))
-            throw new NotSupportedException("Phase 1 manifests use the Fake Provider and require POST_ROUTER_PROFILE=test.");
+        var fakeEnabled = string.Equals(Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE"), "test", StringComparison.Ordinal);
         var fullPath = Path.GetFullPath(path);
         if (new FileInfo(fullPath).Length > 1024 * 1024) throw new InvalidDataException("Manifest exceeds the 1 MiB limit.");
         await using var stream = File.OpenRead(fullPath);
@@ -30,7 +29,9 @@ internal static class ManifestReader
         foreach (var target in manifest.Targets)
         {
             if (string.IsNullOrWhiteSpace(target.Account)) throw new InvalidDataException("Each target requires an account alias.");
-            if (!string.Equals(target.Provider, "fake", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Only the fake provider is available in Phase 1.");
+            var provider = target.Provider.ToLowerInvariant();
+            if (provider is not "fake" and not "x") throw new InvalidDataException("Phase 2A supports the x provider and the test-only fake provider.");
+            if (provider == "fake" && !fakeEnabled) throw new InvalidDataException("The fake provider requires POST_ROUTER_PROFILE=test.");
             if (target.Options is { ValueKind: not JsonValueKind.Object }) throw new InvalidDataException("Target options must be a JSON object.");
         }
         var requestedSchedule = manifest.Schedule is null ? null : ParseSchedule(manifest.Schedule);
@@ -59,9 +60,15 @@ internal static class ManifestReader
         else kind = ContentKind.TextOnly;
 
         var schedule = requestedSchedule ?? new ScheduleIntent(ScheduleMode.Immediate, timeProvider.GetUtcNow(), TimeSpan.FromMinutes(15));
-        var targets = manifest.Targets.Select(target => new TargetIntent(
-            StableAccountId(target.Provider, target.Account), target.Provider.ToLowerInvariant(), target.Visibility, $"{target.Provider.ToLowerInvariant()}-options/v1", target.OptionsVersion,
-            Canonicalize(target.Options), target.Account)).ToArray();
+        var targets = manifest.Targets.Select(target =>
+        {
+            var provider = target.Provider.ToLowerInvariant();
+            var registered = accounts.SingleOrDefault(account => string.Equals(account.ProviderKey, provider, StringComparison.OrdinalIgnoreCase) && string.Equals(account.Alias, target.Account, StringComparison.OrdinalIgnoreCase));
+            if (registered is null && provider != "fake") throw new InvalidDataException($"Account alias '{target.Account}' is not registered for provider '{provider}'.");
+            var accountId = registered?.Id ?? StableAccountId(provider, target.Account);
+            return new TargetIntent(accountId, provider, target.Visibility, $"{provider}-options/v1", target.OptionsVersion,
+                Canonicalize(target.Options), target.Account);
+        }).ToArray();
         return new(manifest.ClientRequestId, new Content(Guid.NewGuid(), kind, manifest.Content.Text, manifest.Content.Title, media), targets, schedule);
     }
 

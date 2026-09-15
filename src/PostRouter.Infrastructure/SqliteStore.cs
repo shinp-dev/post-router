@@ -224,7 +224,9 @@ WHERE j.state='Claimed' AND (j.worker_run_id IS NULL OR j.worker_run_id<>$run) A
             select.CommandText = """
 SELECT j.id,p.id,p.account_id,p.provider_key,s.due_at_utc,s.max_lateness_seconds,p.state,p.first_submitted_at IS NOT NULL
 FROM jobs j JOIN publications p ON p.id=j.publication_id JOIN schedules s ON s.id=p.schedule_id
+JOIN accounts account ON account.id=p.account_id
 WHERE j.state='Queued' AND j.due_at<=$now
+  AND account.status IN ('Ready','Connected')
   AND ((j.kind='Publish' AND p.state IN ('Pending','Preparing','Ready','Publishing'))
     OR (j.kind='Reconcile' AND p.state IN ('Unknown','Processing','CancelRequested')))
   AND NOT EXISTS (
@@ -266,6 +268,16 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
     {
         await using var connection = await database.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction();
+        var accountStatus = await SqliteDatabase.ScalarAsync<string>(connection, transaction,
+            "SELECT status FROM accounts WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.AccountId)));
+        if (accountStatus is not "Ready" and not "Connected")
+        {
+            await SqliteDatabase.ExecuteAsync(connection, transaction,
+                "UPDATE jobs SET state='Queued',worker_run_id=NULL,claimed_at=NULL,safe_error='auth_disconnected',generation=generation+1 WHERE id=$id AND state='Claimed'",
+                cancellationToken, ("$id", Id(item.Job.Id)));
+            transaction.Commit();
+            return null;
+        }
         var currentState = await SqliteDatabase.ScalarAsync<string>(connection, transaction, "SELECT state FROM publications WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.Id)))
             ?? throw new InvalidOperationException("Publication disappeared before dispatch.");
         if (currentState is nameof(PublicationState.CancelRequested) or nameof(PublicationState.Cancelled))
@@ -346,7 +358,10 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
                         ("$due", At(result.RetryAt ?? now.AddSeconds(2))), ("$error", result.SafeError), ("$id", Id(item.Job.Id)));
                 break;
             case StepOutcome.Rejected:
-                var rejectedState = currentState == PublicationState.CancelRequested && result.EffectCertainty == EffectCertainty.NoSideEffect ? PublicationState.Cancelled : PublicationState.Failed;
+                var rejectedState = currentState == PublicationState.CancelRequested && result.EffectCertainty == EffectCertainty.NoSideEffect
+                    ? PublicationState.Cancelled
+                    : result.ObservedState ?? PublicationState.Failed;
+                PublicationStateMachine.EnsureCanTransition(currentState, rejectedState);
                 await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state=$state,safe_error=$error,generation=generation+1 WHERE id=$id", cancellationToken, ("$state", rejectedState.ToString()), ("$error", result.SafeError), ("$id", Id(item.Publication.Id)));
                 await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
                 break;
@@ -439,26 +454,118 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
     {
         await using var connection = await database.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT provider,subject,generation,expires_at,vault_blob_id,status FROM auth_grants WHERE id=$id";
+        command.CommandText = "SELECT provider,subject,generation,expires_at,vault_blob_id,status,account_id,client_id,scope FROM auth_grants WHERE id=$id";
         command.Parameters.AddWithValue("$id", Id(grantId));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) ? new(grantId, reader.GetString(0), reader.GetString(1), reader.GetInt64(2), ParseAt(reader.GetString(3)), reader.GetString(4), reader.GetString(5)) : null;
+        return await reader.ReadAsync(cancellationToken) ? ReadAuthGrant(reader, grantId) : null;
+    }
+
+    public async Task<AuthGrantRecord?> GetAuthGrantForAccountAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,provider,subject,generation,expires_at,vault_blob_id,status,account_id,client_id,scope FROM auth_grants WHERE account_id=$account";
+        command.Parameters.AddWithValue("$account", Id(accountId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), reader.GetInt64(3), ParseAt(reader.GetString(4)), reader.GetString(5), reader.GetString(6),
+            reader.IsDBNull(7) ? null : Guid.Parse(reader.GetString(7)), reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9));
     }
 
     public async Task SaveAuthGrantAsync(AuthGrantRecord grant, CancellationToken cancellationToken = default)
     {
         await using var connection = await database.OpenAsync(cancellationToken);
-        await SqliteDatabase.ExecuteAsync(connection, null, "INSERT INTO auth_grants(id,provider,subject,generation,expires_at,vault_blob_id,status) VALUES($id,$provider,$subject,$generation,$expires,$blob,$status)", cancellationToken,
-            ("$id", Id(grant.Id)), ("$provider", grant.Provider), ("$subject", grant.Subject), ("$generation", grant.Generation), ("$expires", At(grant.ExpiresAt)), ("$blob", grant.VaultBlobId), ("$status", grant.Status));
+        await SqliteDatabase.ExecuteAsync(connection, null, "INSERT INTO auth_grants(id,provider,subject,generation,expires_at,vault_blob_id,status,account_id,client_id,scope) VALUES($id,$provider,$subject,$generation,$expires,$blob,$status,$account,$client,$scope)", cancellationToken,
+            ("$id", Id(grant.Id)), ("$provider", grant.Provider), ("$subject", grant.Subject), ("$generation", grant.Generation), ("$expires", At(grant.ExpiresAt)), ("$blob", grant.VaultBlobId), ("$status", grant.Status),
+            ("$account", grant.AccountId is null ? null : Id(grant.AccountId.Value)), ("$client", grant.ClientId), ("$scope", grant.Scope));
     }
 
     public async Task<bool> ReplaceAuthGrantAsync(Guid id, long expectedGeneration, string vaultBlobId, DateTimeOffset expiresAt, CancellationToken cancellationToken = default)
     {
         await using var connection = await database.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE auth_grants SET vault_blob_id=$blob,expires_at=$expires,generation=generation+1,status='Ready' WHERE id=$id AND generation=$generation";
+        command.CommandText = "UPDATE auth_grants SET vault_blob_id=$blob,expires_at=$expires,generation=generation+1 WHERE id=$id AND generation=$generation";
         command.Parameters.AddWithValue("$blob", vaultBlobId); command.Parameters.AddWithValue("$expires", At(expiresAt)); command.Parameters.AddWithValue("$id", Id(id)); command.Parameters.AddWithValue("$generation", expectedGeneration);
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    public async Task<AccountConnection?> GetAccountConnectionAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+SELECT a.provider_key,a.alias,a.status,a.remote_subject,a.display_name,a.client_id,a.scope,g.expires_at
+FROM accounts a LEFT JOIN auth_grants g ON g.id=a.auth_grant_id
+WHERE a.id=$id AND a.remote_subject IS NOT NULL
+""";
+        command.Parameters.AddWithValue("$id", Id(accountId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new(accountId, reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+            reader.IsDBNull(4) ? reader.GetString(1) : reader.GetString(4), reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+            reader.IsDBNull(6) ? string.Empty : reader.GetString(6), reader.IsDBNull(7) ? null : ParseAt(reader.GetString(7)));
+    }
+
+    public async Task<AccountConnection> SaveConnectedAccountAsync(AccountConnectionWrite write, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction();
+        var existingId = await SqliteDatabase.ScalarAsync<string?>(connection, transaction,
+            "SELECT id FROM accounts WHERE provider_key=$provider AND remote_subject=$subject", cancellationToken,
+            ("$provider", write.Provider), ("$subject", write.RemoteSubject));
+        var accountId = existingId is null ? Guid.NewGuid() : Guid.Parse(existingId);
+        string? oldGrantId = null;
+        string? oldBlobId = null;
+        if (existingId is not null)
+        {
+            oldGrantId = await SqliteDatabase.ScalarAsync<string?>(connection, transaction, "SELECT auth_grant_id FROM accounts WHERE id=$id", cancellationToken, ("$id", existingId));
+            if (oldGrantId is not null)
+                oldBlobId = await SqliteDatabase.ScalarAsync<string?>(connection, transaction, "SELECT vault_blob_id FROM auth_grants WHERE id=$id", cancellationToken, ("$id", oldGrantId));
+        }
+        else
+        {
+            await SqliteDatabase.ExecuteAsync(connection, transaction,
+                "INSERT INTO accounts(id,provider_key,alias,status,remote_subject,display_name,client_id,scope) VALUES($id,$provider,$alias,'Disconnected',$subject,$display,$client,$scope)", cancellationToken,
+                ("$id", Id(accountId)), ("$provider", write.Provider), ("$alias", write.Alias), ("$subject", write.RemoteSubject),
+                ("$display", write.DisplayName), ("$client", write.ClientId), ("$scope", write.Scope));
+        }
+
+        if (oldGrantId is not null)
+        {
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE accounts SET auth_grant_id=NULL WHERE id=$id", cancellationToken, ("$id", Id(accountId)));
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "DELETE FROM auth_grants WHERE id=$id", cancellationToken, ("$id", oldGrantId));
+        }
+        var grantId = Guid.NewGuid();
+        await SqliteDatabase.ExecuteAsync(connection, transaction,
+            "INSERT INTO auth_grants(id,provider,subject,generation,expires_at,vault_blob_id,status,account_id,client_id,scope) VALUES($id,$provider,$subject,0,$expires,$blob,'Connected',$account,$client,$scope)", cancellationToken,
+            ("$id", Id(grantId)), ("$provider", write.Provider), ("$subject", write.RemoteSubject), ("$expires", At(write.ExpiresAt)),
+            ("$blob", write.VaultBlobId), ("$account", Id(accountId)), ("$client", write.ClientId), ("$scope", write.Scope));
+        await SqliteDatabase.ExecuteAsync(connection, transaction,
+            "UPDATE accounts SET alias=$alias,status='Connected',display_name=$display,client_id=$client,scope=$scope,auth_grant_id=$grant WHERE id=$id", cancellationToken,
+            ("$alias", write.Alias), ("$display", write.DisplayName), ("$client", write.ClientId), ("$scope", write.Scope), ("$grant", Id(grantId)), ("$id", Id(accountId)));
+        if (oldBlobId is not null)
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "DELETE FROM vault_blobs WHERE id=$id", cancellationToken, ("$id", oldBlobId));
+        transaction.Commit();
+        return new(accountId, write.Provider, write.Alias, "Connected", write.RemoteSubject, write.DisplayName, write.ClientId, write.Scope, write.ExpiresAt);
+    }
+
+    public async Task<bool> DisconnectAccountAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction();
+        var exists = await SqliteDatabase.ScalarAsync<long>(connection, transaction, "SELECT COUNT(*) FROM accounts WHERE id=$id", cancellationToken, ("$id", Id(accountId))) > 0;
+        if (!exists) { transaction.Commit(); return false; }
+        var grantId = await SqliteDatabase.ScalarAsync<string?>(connection, transaction, "SELECT auth_grant_id FROM accounts WHERE id=$id", cancellationToken, ("$id", Id(accountId)));
+        string? blobId = null;
+        if (grantId is not null)
+            blobId = await SqliteDatabase.ScalarAsync<string?>(connection, transaction, "SELECT vault_blob_id FROM auth_grants WHERE id=$id", cancellationToken, ("$id", grantId));
+        await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE accounts SET status='Disconnected',auth_grant_id=NULL WHERE id=$id", cancellationToken, ("$id", Id(accountId)));
+        if (grantId is not null)
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "DELETE FROM auth_grants WHERE id=$id", cancellationToken, ("$id", grantId));
+        if (blobId is not null)
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "DELETE FROM vault_blobs WHERE id=$id", cancellationToken, ("$id", blobId));
+        transaction.Commit();
+        return true;
     }
 
     public async Task SetQuarantineAsync(bool enabled, CancellationToken cancellationToken = default) { await using var c = await database.OpenAsync(cancellationToken); await SqliteDatabase.ExecuteAsync(c, null, "UPDATE installations SET quarantined=$value,restore_epoch=restore_epoch+CASE WHEN $value=1 THEN 1 ELSE 0 END", cancellationToken, ("$value", enabled ? 1 : 0)); }
@@ -624,6 +731,11 @@ LEFT JOIN provider_checkpoints c ON c.publication_id=p.id WHERE j.id=$id
         Enum.Parse<PublicationState>(reader.GetString(4)), Enum.Parse<ExecutionMode>(reader.GetString(5)), ParseAt(reader.GetString(6)),
         TimeSpan.FromSeconds(reader.GetInt64(7)), ParseAt(reader.GetString(8)), NullableAt(reader, 9), NullableAt(reader, 10), NullableAt(reader, 11),
         reader.IsDBNull(12) ? null : reader.GetString(12), reader.GetInt64(13));
+
+    private static AuthGrantRecord ReadAuthGrant(SqliteDataReader reader, Guid grantId) => new(
+        grantId, reader.GetString(0), reader.GetString(1), reader.GetInt64(2), ParseAt(reader.GetString(3)),
+        reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : Guid.Parse(reader.GetString(6)),
+        reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8));
 
     private static async Task<IReadOnlyList<Guid>> PublicationIdsAsync(SqliteConnection connection, SqliteTransaction transaction, Guid postId, CancellationToken cancellationToken)
     {

@@ -12,15 +12,31 @@ public sealed record PostSummary(Guid PostId, string ClientRequestId, DateTimeOf
 public sealed record QueueItem(Guid JobId, JobKind Kind, JobState State, DateTimeOffset DueAt, Guid OwnerId, string ProviderKey, int AttemptNo, string? SafeError);
 public sealed record RawMetricInput(string Provider, string ApiVersion, string SubjectRef, byte[] Payload, DateTimeOffset ExpiresAt);
 public sealed record StatsWrite(RawMetricInput Raw, MetricsSnapshot Snapshot);
-public sealed record AuthGrantRecord(Guid Id, string Provider, string Subject, long Generation, DateTimeOffset ExpiresAt, string VaultBlobId, string Status);
-public sealed class TokenMaterial(string accessToken, string? refreshToken, DateTimeOffset expiresAt)
+public sealed record AuthGrantRecord(
+    Guid Id, string Provider, string Subject, long Generation, DateTimeOffset ExpiresAt,
+    string VaultBlobId, string Status, Guid? AccountId = null, string? ClientId = null, string? Scope = null);
+public sealed record TokenMaterial(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt)
 {
-    public string AccessToken { get; } = accessToken;
-    public string? RefreshToken { get; } = refreshToken;
-    public DateTimeOffset ExpiresAt { get; } = expiresAt;
     public override string ToString() => "[REDACTED TOKEN MATERIAL]";
 }
 public sealed record RefreshResult(TokenMaterial Material, string ProviderRequestId);
+public sealed record AccountConnection(
+    Guid AccountId, string Provider, string Alias, string Status, string RemoteSubject,
+    string DisplayName, string ClientId, string Scope, DateTimeOffset? TokenExpiresAt);
+public sealed record AccountConnectionWrite(
+    string Provider, string Alias, string RemoteSubject, string DisplayName, string ClientId,
+    string Scope, DateTimeOffset ExpiresAt, string VaultBlobId);
+public sealed record AuthorizationSession(
+    string Provider, string ClientId, Uri RedirectUri, Uri AuthorizationUri, string State,
+    string CodeVerifier, string Scope, Guid? ExpectedAccountId = null, string? ExpectedSubject = null,
+    string? Alias = null);
+public sealed record ConnectedIdentity(string RemoteSubject, string DisplayName, string Scope, TokenMaterial Material);
+public sealed record AccountRevokeResult(Guid AccountId, bool RemoteRevoked, bool LocalDisconnected, string? SafeError);
+public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
+{
+    public string SafeCode { get; } = safeCode;
+    public bool Retryable { get; } = retryable;
+}
 public sealed record DoctorCheck(string Name, bool Healthy, string Code, string Message);
 public sealed record BackupResult(string Path, string Sha256, DateTimeOffset CreatedAt);
 public sealed record RestorePublication(Guid PublicationId, PublicationState State, string Risk, bool HasRemoteObject);
@@ -47,8 +63,12 @@ public interface IPostRouterStore
     Task<IReadOnlyList<MetricsSnapshot>> GetStatsAsync(Guid accountId, string subjectRef, CancellationToken cancellationToken = default);
     Task<int> PurgeExpiredRawAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
     Task<AuthGrantRecord?> GetAuthGrantAsync(Guid grantId, CancellationToken cancellationToken = default);
+    Task<AuthGrantRecord?> GetAuthGrantForAccountAsync(Guid accountId, CancellationToken cancellationToken = default);
     Task SaveAuthGrantAsync(AuthGrantRecord grant, CancellationToken cancellationToken = default);
     Task<bool> ReplaceAuthGrantAsync(Guid id, long expectedGeneration, string vaultBlobId, DateTimeOffset expiresAt, CancellationToken cancellationToken = default);
+    Task<AccountConnection?> GetAccountConnectionAsync(Guid accountId, CancellationToken cancellationToken = default);
+    Task<AccountConnection> SaveConnectedAccountAsync(AccountConnectionWrite write, CancellationToken cancellationToken = default);
+    Task<bool> DisconnectAccountAsync(Guid accountId, CancellationToken cancellationToken = default);
     Task SetQuarantineAsync(bool enabled, CancellationToken cancellationToken = default);
     Task<bool> IsQuarantinedAsync(CancellationToken cancellationToken = default);
     Task<RestoreStatus> GetRestoreStatusAsync(CancellationToken cancellationToken = default);
@@ -60,6 +80,8 @@ public interface IPostRouterStore
 public interface IProviderAdapter
 {
     string ProviderKey { get; }
+    bool RequiresConnectedAccount { get; }
+    void Validate(Content content, TargetIntent target);
     Task<ProviderStep> PlanNextStepAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken);
     Task<StepResult> ExecuteStepAsync(ProviderStep providerStep, CancellationToken cancellationToken);
     Task<StepResult> ReconcileAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken);
@@ -101,11 +123,20 @@ public interface IVault
 public interface IAuthProvider
 {
     string ProviderKey { get; }
-    Task<RefreshResult> RefreshAsync(TokenMaterial current, CancellationToken cancellationToken);
+    Task<RefreshResult> RefreshAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken);
+}
+
+public interface IInteractiveAuthProvider : IAuthProvider
+{
+    AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? requestedAlias = null);
+    Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken);
+    Task RevokeAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken);
 }
 
 public interface IAuthGrantLock : IAsyncDisposable { }
 public interface IAuthGrantLockFactory { ValueTask<IAuthGrantLock> AcquireAsync(Guid grantId, CancellationToken cancellationToken = default); }
+public interface IAccountOperationLock : IAsyncDisposable { }
+public interface IAccountOperationLockFactory { ValueTask<IAccountOperationLock> AcquireAsync(Guid accountId, CancellationToken cancellationToken = default); }
 
 public interface IDatabaseMaintenance
 {

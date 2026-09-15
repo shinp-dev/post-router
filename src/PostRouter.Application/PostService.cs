@@ -10,6 +10,17 @@ public sealed class PostService(IPostRouterStore store, IMaintenanceGate mainten
     {
         await using var lease = await maintenanceGate.AcquireSharedAsync(cancellationToken).ConfigureAwait(false);
         Validate(intent);
+        var accounts = await store.GetAccountsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var target in intent.Targets)
+        {
+            var adapter = providers.GetRequired(target.ProviderKey);
+            if (!adapter.RequiresConnectedAccount) continue;
+            var account = accounts.SingleOrDefault(candidate => candidate.Id == target.AccountId);
+            if (account is null || !string.Equals(account.ProviderKey, target.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Target account is not connected to the selected provider.");
+            if (!string.Equals(account.Status, "Connected", StringComparison.Ordinal))
+                throw new InvalidOperationException("Target account authentication is disconnected.");
+        }
         var canonical = CanonicalIntent.Serialize(intent);
         var hash = CanonicalIntent.Hash(canonical);
         return await store.EnqueueAsync(intent, canonical, hash, cancellationToken).ConfigureAwait(false);
@@ -46,6 +57,7 @@ public sealed class PostService(IPostRouterStore store, IMaintenanceGate mainten
         if (intent.Targets.Select(x => x.AccountId).Distinct().Count() != intent.Targets.Count)
             throw new ArgumentException("A target account may appear only once.");
         foreach (var target in intent.Targets) _ = providers.GetRequired(target.ProviderKey);
+        foreach (var target in intent.Targets) providers.GetRequired(target.ProviderKey).Validate(intent.Content, target);
         foreach (var target in intent.Targets)
         {
             using var options = System.Text.Json.JsonDocument.Parse(target.CanonicalOptionsJson);

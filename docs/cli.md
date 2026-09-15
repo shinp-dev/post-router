@@ -33,6 +33,8 @@
 | db restore FILE / db restore status / db restore suppress ID / db restore release | 復元後は全送信jobをquarantine。照合・attach、または不明対象の送信抑止後に安全なjobだけ解放 |
 | data purge --account ALIAS | ローカルprovider由来データ削除。再収集するには明示再開 |
 
+Phase 2Aの実装名は、上表の将来alias UXより安全なID指定を優先して、`account connect x --client-id ... --redirect-uri ... --alias ...`、`account status/disconnect/reset/revoke/reconnect --account UUID`とする。disconnect/resetはlocal tokenだけを削除し、revokeはX公式revokeを試みた後、成否を明示してlocal tokenを必ず削除する。reconnectは保存済みremote subjectと一致しなければ拒否する。
+
 ## 共通投稿入力
 
 `--text` またはUTF-8 `--text-file`、`--image`（複数指定可）、`--video`（1本）、`--title`、`--to`、`--visibility`、`--at`、`--tz`、`--options-file`、`--idempotency-key`。imagesとvideoを同時指定する混在投稿はMVPで拒否する。音声のみ、thread、carouselは将来拡張。
