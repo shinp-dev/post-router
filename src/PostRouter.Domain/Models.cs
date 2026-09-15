@@ -2,10 +2,11 @@ namespace PostRouter.Domain;
 
 public enum ContentKind { TextOnly, ImageSet, Video }
 public enum ScheduleMode { Immediate, AtTime }
+public enum ApprovalPolicy { Automatic, RequireApproval }
 public enum ExecutionMode { Local, Native, HumanCompletion, PolicyBlocked }
 public enum PublicationState
 {
-    Pending, Preparing, Ready, Publishing, Processing, ScheduledRemote, Published,
+    Pending, Preparing, Ready, AwaitingApproval, Publishing, Processing, ScheduledRemote, Published,
     Unknown, AwaitingUser, NeedsAttention, Failed, Expired, CancelRequested, Cancelled
 }
 public enum JobState { Queued, Claimed, Done, Blocked, Cancelled }
@@ -28,7 +29,7 @@ public sealed record Content(
 
 public sealed record TargetIntent(
     Guid AccountId, string ProviderKey, string Visibility, string OptionsSchema, int OptionsVersion, string CanonicalOptionsJson,
-    string? AccountAlias = null);
+    string? AccountAlias = null, ApprovalPolicy ApprovalPolicy = ApprovalPolicy.Automatic);
 
 public sealed record Account(Guid Id, string ProviderKey, string Alias, string Status);
 

@@ -7,8 +7,11 @@ public sealed class OperationsService(
     IMaintenanceGate maintenanceGate,
     IProviderRegistry providers,
     PostService posts,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IPublicationApprovalStore? approvalStore = null)
 {
+    private readonly IPublicationApprovalStore _approvalStore = approvalStore ?? PassThroughPublicationApprovalStore.Instance;
+
     public IReadOnlyList<ProviderCapabilities> Capabilities() => providers.GetCapabilities();
 
     public async Task<DashboardSummary> DashboardAsync(CancellationToken cancellationToken = default)
@@ -36,23 +39,35 @@ public sealed class OperationsService(
         return await store.GetPublicationDetailAsync(publicationId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<EnqueueResult> EnqueueTextAsync(CreateTextPostRequest request, CancellationToken cancellationToken = default)
+    public async Task<PublicationApprovalStatus> PublicationApprovalAsync(Guid publicationId, CancellationToken cancellationToken = default)
+    {
+        await using var lease = await maintenanceGate.AcquireSharedAsync(cancellationToken).ConfigureAwait(false);
+        return await _approvalStore.GetStatusAsync(publicationId, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<EnqueueResult> EnqueueTextAsync(CreateTextPostRequest request, CancellationToken cancellationToken = default) =>
+        EnqueueTextAsync(request, ApprovalPolicy.Automatic, cancellationToken);
+
+    public async Task<EnqueueResult> EnqueueTextAsync(CreateTextPostRequest request, ApprovalPolicy approvalPolicy, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Text)) throw new ArgumentException("Post text is required.");
         return await EnqueueAsync(request.AccountId, request.Text, [], ContentKind.TextOnly,
-            request.PublishAt, request.ClientRequestId, cancellationToken).ConfigureAwait(false);
+            request.PublishAt, request.ClientRequestId, approvalPolicy, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<EnqueueResult> EnqueueImagesAsync(CreateImagePostRequest request, CancellationToken cancellationToken = default)
+    public Task<EnqueueResult> EnqueueImagesAsync(CreateImagePostRequest request, CancellationToken cancellationToken = default) =>
+        EnqueueImagesAsync(request, ApprovalPolicy.Automatic, cancellationToken);
+
+    public async Task<EnqueueResult> EnqueueImagesAsync(CreateImagePostRequest request, ApprovalPolicy approvalPolicy, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Text)) throw new ArgumentException("Post text is required.");
         if (request.Images.Count is < 1 or > 4) throw new ArgumentException("Image posts require one to four images.");
         return await EnqueueAsync(request.AccountId, request.Text, request.Images, ContentKind.ImageSet,
-            request.PublishAt, request.ClientRequestId, cancellationToken).ConfigureAwait(false);
+            request.PublishAt, request.ClientRequestId, approvalPolicy, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<EnqueueResult> EnqueueAsync(Guid accountId, string text, IReadOnlyList<MediaAsset> media,
-        ContentKind kind, DateTimeOffset? publishAt, string? clientRequestId, CancellationToken cancellationToken)
+        ContentKind kind, DateTimeOffset? publishAt, string? clientRequestId, ApprovalPolicy approvalPolicy, CancellationToken cancellationToken)
     {
         var accounts = await posts.AccountsAsync(cancellationToken).ConfigureAwait(false);
         var account = accounts.SingleOrDefault(candidate => candidate.Id == accountId)
@@ -77,13 +92,20 @@ public sealed class OperationsService(
             string.IsNullOrWhiteSpace(clientRequestId) ? $"gui-{Guid.NewGuid():N}" : clientRequestId,
             new Content(Guid.NewGuid(), kind, text, null, media),
             [new TargetIntent(account.Id, account.ProviderKey, visibility, capability.OptionsSchema,
-                capability.OptionsVersion, capability.DefaultOptionsJson, account.Alias)],
+                capability.OptionsVersion, capability.DefaultOptionsJson, account.Alias, approvalPolicy)],
             schedule);
         return await posts.EnqueueAsync(intent, cancellationToken).ConfigureAwait(false);
     }
 
     public Task<int> CancelAsync(Guid postId, CancellationToken cancellationToken = default) =>
         posts.CancelAsync(postId, cancellationToken);
+
+    public async Task ApproveAsync(Guid publicationId, CancellationToken cancellationToken = default)
+    {
+        await using var lease = await maintenanceGate.AcquireSharedAsync(cancellationToken).ConfigureAwait(false);
+        if (!await _approvalStore.ApproveAsync(publicationId, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Publication does not require approval or cannot be approved in its current state.");
+    }
 
     public async Task RetryAsync(Guid publicationId, CancellationToken cancellationToken = default)
     {

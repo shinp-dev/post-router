@@ -16,17 +16,19 @@ internal sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
 internal sealed class TestContext : IAsyncDisposable
 {
     private readonly AesGcmSecretProtector _protector;
-    private TestContext(string directory, ManualTimeProvider time, AesGcmSecretProtector protector, SqliteDatabase database, SqliteStore store, FileMaintenanceGate gate, FakeProvider provider, PostService posts, WorkerService worker, OperationsService operations)
+    private TestContext(string directory, ManualTimeProvider time, AesGcmSecretProtector protector, SqliteDatabase database, SqliteStore store, PublicationApprovalStore approvals, FileMaintenanceGate gate, FakeProvider provider, PostService posts, WorkerService worker, OperationsService operations)
     {
-        Directory = directory; Time = time; _protector = protector; Database = database; Store = store; Gate = gate; Provider = provider; Posts = posts; Worker = worker;
-        Stats = new(store, gate, new ProviderRegistry([provider]), time);
-        Maintenance = new(new DatabaseMaintenance(database, gate, Path.Combine(directory, "spool")), store, time);
+        Directory = directory; Time = time; _protector = protector; Database = database; Store = store; Approvals = approvals; Gate = gate; Provider = provider; Posts = posts; Worker = worker;
+        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time);
+        Stats = new(applicationStore, gate, new ProviderRegistry([provider]), time);
+        Maintenance = new(new DatabaseMaintenance(database, gate, Path.Combine(directory, "spool")), applicationStore, time);
         Operations = operations;
     }
     public string Directory { get; }
     public ManualTimeProvider Time { get; }
     public SqliteDatabase Database { get; }
     public SqliteStore Store { get; }
+    public PublicationApprovalStore Approvals { get; }
     public FileMaintenanceGate Gate { get; }
     public FakeProvider Provider { get; }
     public PostService Posts { get; }
@@ -46,17 +48,19 @@ internal sealed class TestContext : IAsyncDisposable
         var store = new SqliteStore(database, protector);
         var gate = new FileMaintenanceGate(directory);
         await store.InitializeAsync();
+        var approvals = new PublicationApprovalStore(database);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time);
         var provider = new FakeProvider();
         var providers = new ProviderRegistry([provider]);
-        var posts = new PostService(store, gate, providers, time);
-        var worker = new WorkerService(store, providers, new FileWorkerLockFactory(Path.Combine(directory, "worker.lock")), gate, time);
-        var operations = new OperationsService(store, gate, providers, posts, time);
-        return new(directory, time, protector, database, store, gate, provider, posts, worker, operations);
+        var posts = new PostService(applicationStore, gate, providers, time);
+        var worker = new WorkerService(applicationStore, providers, new FileWorkerLockFactory(Path.Combine(directory, "worker.lock")), gate, time);
+        var operations = new OperationsService(applicationStore, gate, providers, posts, time, approvals);
+        return new(directory, time, protector, database, store, approvals, gate, provider, posts, worker, operations);
     }
 
-    public CanonicalPostIntent Intent(string key = "release-a", string text = "hello", DateTimeOffset? due = null, TimeSpan? maxLateness = null) =>
+    public CanonicalPostIntent Intent(string key = "release-a", string text = "hello", DateTimeOffset? due = null, TimeSpan? maxLateness = null, ApprovalPolicy approvalPolicy = ApprovalPolicy.Automatic) =>
         new(key, new Content(Guid.NewGuid(), ContentKind.TextOnly, text, null, []),
-            [new TargetIntent(AccountId, "fake", "public", "fake-options/v1", 1, "{}")],
+            [new TargetIntent(AccountId, "fake", "public", "fake-options/v1", 1, "{}", ApprovalPolicy: approvalPolicy)],
             new ScheduleIntent(due is null ? ScheduleMode.Immediate : ScheduleMode.AtTime, due ?? Time.GetUtcNow(), maxLateness ?? TimeSpan.FromMinutes(15)));
 
     public async ValueTask DisposeAsync()

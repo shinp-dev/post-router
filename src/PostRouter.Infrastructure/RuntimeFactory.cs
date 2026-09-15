@@ -15,26 +15,30 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         MaintenanceGate = maintenanceGate;
         _protector = protector;
         _httpClient = httpClient;
+        var database = new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db"));
+        Approvals = new PublicationApprovalStore(database);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System);
         var accountLocks = new FileAccountOperationLockFactory(Path.Combine(dataDirectory, "locks"));
         var grantLocks = new FileAuthGrantLockFactory(Path.Combine(dataDirectory, "locks"));
         var xClient = new XApiClient(httpClient, TimeProvider.System);
         var xAuth = new XAuthProvider(xClient, TimeProvider.System);
-        Auth = new(store, store, grantLocks, maintenanceGate, [fakeProvider, xAuth], TimeProvider.System);
-        Accounts = new(store, store, maintenanceGate, accountLocks, [xAuth], Auth);
+        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth], TimeProvider.System);
+        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth], Auth);
         var adapters = fakeEnabled
             ? new IProviderAdapter[] { fakeProvider, new XProviderAdapter(Auth, xClient, TimeProvider.System) }
             : [new XProviderAdapter(Auth, xClient, TimeProvider.System)];
         var providers = new ProviderRegistry(adapters);
-        Posts = new(store, maintenanceGate, providers, TimeProvider.System);
-        Operations = new(store, maintenanceGate, providers, Posts, TimeProvider.System);
-        Worker = new(store, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System, accountOperationLocks: accountLocks);
-        Stats = new(store, maintenanceGate, providers, TimeProvider.System);
+        Posts = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
+        Operations = new(applicationStore, maintenanceGate, providers, Posts, TimeProvider.System, Approvals);
+        Worker = new(applicationStore, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System, accountOperationLocks: accountLocks);
+        Stats = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
         var spoolDirectory = Path.Combine(dataDirectory, "spool");
-        Maintenance = new(new DatabaseMaintenance(new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db")), maintenanceGate, spoolDirectory), store, TimeProvider.System);
+        Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, spoolDirectory), applicationStore, TimeProvider.System);
         Spool = new SpoolStore(spoolDirectory);
     }
     public string DataDirectory { get; }
     public SqliteStore Store { get; }
+    public PublicationApprovalStore Approvals { get; }
     public FakeProvider FakeProvider { get; }
     public FileMaintenanceGate MaintenanceGate { get; }
     public AuthCoordinator Auth { get; }
