@@ -5,9 +5,10 @@ public static class PublicationStateMachine
     private static readonly Dictionary<PublicationState, HashSet<PublicationState>> Allowed =
         new Dictionary<PublicationState, HashSet<PublicationState>>
         {
-            [PublicationState.Pending] = [PublicationState.Preparing, PublicationState.Ready, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.NeedsAttention],
-            [PublicationState.Preparing] = [PublicationState.Ready, PublicationState.Processing, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
-            [PublicationState.Ready] = [PublicationState.Publishing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.Failed, PublicationState.NeedsAttention],
+            [PublicationState.Pending] = [PublicationState.Preparing, PublicationState.Ready, PublicationState.AwaitingApproval, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.NeedsAttention],
+            [PublicationState.Preparing] = [PublicationState.Ready, PublicationState.AwaitingApproval, PublicationState.Processing, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
+            [PublicationState.Ready] = [PublicationState.AwaitingApproval, PublicationState.Publishing, PublicationState.ScheduledRemote, PublicationState.CancelRequested, PublicationState.Expired, PublicationState.Failed, PublicationState.NeedsAttention],
+            [PublicationState.AwaitingApproval] = [PublicationState.Ready, PublicationState.CancelRequested, PublicationState.Cancelled, PublicationState.NeedsAttention],
             [PublicationState.Publishing] = [PublicationState.Processing, PublicationState.Published, PublicationState.Unknown, PublicationState.Failed, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.Processing] = [PublicationState.Published, PublicationState.Failed, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
             [PublicationState.ScheduledRemote] = [PublicationState.Published, PublicationState.Unknown, PublicationState.NeedsAttention, PublicationState.CancelRequested],
@@ -28,7 +29,7 @@ public static class PublicationStateMachine
     }
 
     public static bool CanCancel(PublicationState state) => state is
-        PublicationState.Pending or PublicationState.Preparing or PublicationState.Ready or
+        PublicationState.Pending or PublicationState.Preparing or PublicationState.Ready or PublicationState.AwaitingApproval or
         PublicationState.Publishing or PublicationState.Processing or PublicationState.ScheduledRemote or
         PublicationState.AwaitingUser or PublicationState.NeedsAttention;
 
