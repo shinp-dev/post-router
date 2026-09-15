@@ -2,7 +2,26 @@
 
 人間が用意したコンテンツを、公式APIで配信・予約し、結果を回収する単一ユーザー向けCLI。
 
-**状態: 設計のみ / 2026-09-14。以下のコマンドは提案仕様であり、未実装です。**
+**状態: Phase 1 Core + SQLite + Fake Provider 実装済み / 2026-09-15。X / YouTube / Instagram / TikTokの本番Adapterは未実装です。**
+
+Phase 1は配信基盤の不変条件を実装・検証する段階であり、SNSへ通信しない。Fake Providerは `POST_ROUTER_PROFILE=test` を明示した場合だけ登録され、通常profileでFake結果を本番公開済みとして扱う経路はない。
+
+## Phase 1 quick start
+
+.NET 10 SDKを用意し、依存関係をlock fileどおり復元する。
+
+```powershell
+dotnet restore PostRouter.sln --locked-mode
+dotnet build PostRouter.sln -c Release --no-restore
+dotnet test PostRouter.sln -c Release --no-build --no-restore
+
+$env:POST_ROUTER_PROFILE = "test"
+dotnet run --project src/PostRouter.Cli -- --data-dir ./.local post --file contracts/examples/release.fake.json
+dotnet run --project src/PostRouter.Cli -- --data-dir ./.local worker once
+dotnet run --project src/PostRouter.Cli -- --data-dir ./.local queue
+```
+
+Phase 1で実装済みの主な操作は `account list`、`post/status/cancel`、`queue`、`worker once/run/stop/install/start/status/uninstall`、`stats sync/show/purge-expired`、`doctor`、`db backup/check/restore` と復元後の `status/suppress/release`。`worker install` 系はWindowsの同一ユーザーTask Schedulerを利用する。
 
 ## 設計上の結論
 
@@ -12,7 +31,7 @@ C# / .NET 10 LTS、System.CommandLine、SQLiteを採用する。1つの実行フ
 
 実用MVPはX、監査承認後のYouTube、ProfessionalアカウントのInstagramを順に実現する。TikTokは能力・認証・結果回収の設計を用意し、Direct Postはpolicy-blockedとする。Display APIや手動完了型Uploadも、それぞれ利用目的と審査の確認が必要。
 
-## 利用例
+## 将来の本番利用例
 
 PowerShellでもそのまま扱いやすい一行形式。対象アカウント、公開範囲、YouTube固有必須値は登録・投稿時に明示する。
 
@@ -29,7 +48,7 @@ pub stats show --post <post-id> --layout provider-columns
 pub doctor --online --json
 ```
 
-`release.json` の完全例は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
+以下はPhase 2以降の目標UXであり、まだ実行できない。本番用 `release.json` の仕様は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
 
 `--at` は希望公開時刻。YouTubeは事前アップロード後のnative予約、X/Instagramはローカル実行を使う。厳密な同時公開、電源OFF中のローカル投稿、ネットワーク越しのexactly-onceは保証しない。成否不明時は照合を優先し、自動再投稿しない。
 
@@ -59,5 +78,6 @@ pub doctor --online --json
 | [テスト](docs/testing.md) | 障害注入と出荷ゲート |
 | [実装計画](docs/implementation-plan.md) | Phase、外部条件、人間の準備 |
 | [最終設計監査](docs/design-review.md) | 指摘、修正、残留リスク |
+| [Phase 1実装監査](docs/phase1-review.md) | 実装境界、自動試験、実機gate |
 
 公式APIの調査と設計判断は区別する。Instagramは公式本文の一部取得に制限があり、細部の未確認事項をAPI調査書のG-IGに明記した。設計完了は審査通過・本番動作確認を意味しない。
