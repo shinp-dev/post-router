@@ -38,7 +38,11 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth, youtubeAuth], TimeProvider.System);
         Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth, youtubeAuth], Auth);
         var xAdapter = new XProviderAdapter(Auth, xClient, TimeProvider.System);
-        var youtubeAdapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(Auth, youtubeClient, TimeProvider.System), TimeProvider.System);
+        var youtubeAdapter = new YouTubeResumeSafeAdapter(
+            new YouTubeProviderAdapter(Auth, youtubeClient, TimeProvider.System),
+            TimeProvider.System,
+            Auth,
+            youtubeClient);
         var adapters = fakeEnabled
             ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter }
             : [xAdapter, youtubeAdapter];
