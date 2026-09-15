@@ -19,7 +19,7 @@ internal sealed class TestContext : IAsyncDisposable
     private TestContext(string directory, ManualTimeProvider time, AesGcmSecretProtector protector, SqliteDatabase database, SqliteStore store, PublicationApprovalStore approvals, FileMaintenanceGate gate, FakeProvider provider, PostService posts, WorkerService worker, OperationsService operations)
     {
         Directory = directory; Time = time; _protector = protector; Database = database; Store = store; Approvals = approvals; Gate = gate; Provider = provider; Posts = posts; Worker = worker;
-        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time, database);
         Stats = new(applicationStore, gate, new ProviderRegistry([provider]), time);
         Maintenance = new(new DatabaseMaintenance(database, gate, Path.Combine(directory, "spool")), applicationStore, time);
         Operations = operations;
@@ -49,7 +49,7 @@ internal sealed class TestContext : IAsyncDisposable
         var gate = new FileMaintenanceGate(directory);
         await store.InitializeAsync();
         var approvals = new PublicationApprovalStore(database);
-        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, approvals, time, database);
         var provider = new FakeProvider();
         var providers = new ProviderRegistry([provider]);
         var posts = new PostService(applicationStore, gate, providers, time);
