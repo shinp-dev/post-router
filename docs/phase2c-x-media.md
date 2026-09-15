@@ -2,6 +2,12 @@
 
 確認日: 2026-09-15。
 
+## Status summary
+
+- X text posting: 実装済み
+- X JPEG image posting: 実装済み
+- X native video posting: **Pending**
+
 公式X API v2は`POST /2/media/upload`で画像をuploadし、返却されたmedia IDを`POST /2/tweets`の`media.media_ids`へ渡す。Postには写真最大4枚、GIFまたは動画は1つを添付できる。画像上限は1ファイル5 MB。動画はすべてchunked uploadが必要で、upload成功後もaccount entitlementによりPost作成が拒否され得る。
 
 参照:
