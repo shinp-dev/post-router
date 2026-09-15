@@ -94,6 +94,29 @@ public sealed class PublicationApprovalTests
     }
 
     [Fact]
+    public async Task Late_approval_does_not_turn_expired_schedule_into_immediate_publish()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var due = context.Time.GetUtcNow().AddMinutes(1);
+        var queued = await context.Posts.EnqueueAsync(context.Intent(
+            key: "approval-late",
+            due: due,
+            maxLateness: TimeSpan.FromMinutes(2),
+            approvalPolicy: ApprovalPolicy.RequireApproval));
+        var publicationId = Assert.Single(queued.PublicationIds);
+
+        context.Time.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(1, await context.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.AwaitingApproval, Assert.Single((await context.Posts.GetAsync(queued.PostId))!.Publications).State);
+
+        context.Time.Advance(TimeSpan.FromMinutes(3));
+        await context.Operations.ApproveAsync(publicationId);
+        Assert.Equal(0, await context.Worker.RunOnceAsync());
+        Assert.Equal(0, context.Provider.PublishCalls);
+        Assert.Equal(PublicationState.Expired, Assert.Single((await context.Posts.GetAsync(queued.PostId))!.Publications).State);
+    }
+
+    [Fact]
     public async Task Approval_is_idempotent_for_the_same_intent_hash()
     {
         await using var context = await TestContext.CreateAsync();
