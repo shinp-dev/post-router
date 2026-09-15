@@ -13,6 +13,8 @@ namespace PostRouter.Infrastructure;
 internal sealed class YouTubeProviderException(string safeCode, bool retryable, Exception? inner = null)
     : ProviderOperationException(safeCode, retryable, inner);
 
+internal sealed record YouTubeFailureMapping(string SafeCode, bool Retryable);
+
 internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeProvider)
 {
     private const int MaxResponseBytes = 1024 * 1024;
@@ -53,14 +55,16 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
             Content = new FormUrlEncodedContent(new Dictionary<string, string> { ["token"] = token }),
         };
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_revoke_rejected");
+        if (!response.IsSuccessStatusCode)
+            throw await MapFailureAsync(response, "youtube_revoke_rejected", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<YouTubeChannel> GetCurrentChannelAsync(string accessToken, CancellationToken cancellationToken)
     {
         using var request = Authorized(HttpMethod.Get, ChannelsEndpoint, accessToken);
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_channel_lookup_rejected");
+        if (!response.IsSuccessStatusCode)
+            throw await MapFailureAsync(response, "youtube_channel_lookup_rejected", cancellationToken).ConfigureAwait(false);
         var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -77,6 +81,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         MediaAsset asset,
         string title,
         string description,
+        YouTubeOptions options,
         CancellationToken cancellationToken)
     {
         await VerifyMediaAsync(asset, cancellationToken).ConfigureAwait(false);
@@ -85,10 +90,11 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         request.Headers.TryAddWithoutValidation("X-Upload-Content-Type", asset.DetectedMime);
         var metadata = new YouTubeInsertRequest(
             new YouTubeSnippetWrite(title, description),
-            new YouTubeStatusWrite("private"));
+            new YouTubeStatusWrite("private", options.MadeForKids, options.ContainsSyntheticMedia));
         request.Content = JsonContent(metadata);
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_upload_session_rejected");
+        if (!response.IsSuccessStatusCode)
+            throw await MapFailureAsync(response, "youtube_upload_session_rejected", cancellationToken).ConfigureAwait(false);
         if (response.Headers.Location is null || !ValidUploadSession(response.Headers.Location))
             throw new YouTubeProviderException("youtube_upload_session_malformed", false);
         return response.Headers.Location;
@@ -114,11 +120,11 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         using (response)
         {
             if ((int)response.StatusCode == 308)
-                return new(false, null, NextOffset(response), false, null);
+                return new(false, null, NextOffset(response), false, null, RetryAt: RetryAt(response));
             if (response.StatusCode == HttpStatusCode.NotFound)
                 return new(false, null, 0, true, "youtube_upload_session_expired");
             if (!response.IsSuccessStatusCode)
-                throw MapFailure(response.StatusCode, "youtube_upload_status_rejected");
+                throw await MapFailureAsync(response, "youtube_upload_status_rejected", cancellationToken).ConfigureAwait(false);
             return await CompletedUploadAsync(response, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -154,13 +160,14 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
             if ((int)response.StatusCode == 308)
             {
                 var next = NextOffset(response);
-                return new(false, null, next, false, next > offset ? null : "youtube_upload_no_progress");
+                return new(false, null, next, false, next > offset ? null : "youtube_upload_no_progress", RetryAt: RetryAt(response));
             }
             if (response.StatusCode == HttpStatusCode.NotFound)
                 return new(false, null, 0, true, "youtube_upload_session_expired");
             if ((int)response.StatusCode >= 500)
                 return new(false, null, offset, false, "youtube_upload_response_uncertain", NeedsStatusQuery: true, RetryAt: RetryAt(response) ?? timeProvider.GetUtcNow().AddSeconds(15));
-            if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_upload_rejected");
+            if (!response.IsSuccessStatusCode)
+                throw await MapFailureAsync(response, "youtube_upload_rejected", cancellationToken).ConfigureAwait(false);
             return await CompletedUploadAsync(response, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -170,7 +177,8 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         var uri = new Uri($"https://www.googleapis.com/youtube/v3/videos?part=status,processingDetails,suggestions&id={Uri.EscapeDataString(videoId)}");
         using var request = Authorized(HttpMethod.Get, uri, accessToken);
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_video_status_rejected");
+        if (!response.IsSuccessStatusCode)
+            throw await MapFailureAsync(response, "youtube_video_status_rejected", cancellationToken).ConfigureAwait(false);
         var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -213,10 +221,15 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         }
         using (response)
         {
-            if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                return new(false, false, "youtube_rate_limited", RetryAt(response) ?? timeProvider.GetUtcNow().AddMinutes(15));
             if ((int)response.StatusCode >= 500) return new(false, true, "youtube_publish_server_uncertain");
-            if (!response.IsSuccessStatusCode) return new(false, false, MapSafeCode(response.StatusCode, "youtube_publish_rejected"));
+            if (!response.IsSuccessStatusCode)
+            {
+                var failure = await MapFailureAsync(response, "youtube_publish_rejected", cancellationToken).ConfigureAwait(false);
+                var retryAt = failure.SafeCode == "youtube_rate_limited"
+                    ? RetryAt(response) ?? timeProvider.GetUtcNow().AddMinutes(15)
+                    : null;
+                return new(false, false, failure.SafeCode, retryAt);
+            }
             var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
             try
             {
@@ -234,7 +247,8 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, TokenEndpoint) { Content = new FormUrlEncodedContent(fields) };
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) throw MapFailure(response.StatusCode, "youtube_token_rejected");
+        if (!response.IsSuccessStatusCode)
+            throw await MapFailureAsync(response, "youtube_token_rejected", cancellationToken).ConfigureAwait(false);
         var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -326,16 +340,55 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
             throw new YouTubeProviderException("media_integrity_mismatch", false);
     }
 
-    private static YouTubeProviderException MapFailure(HttpStatusCode status, string fallback) =>
-        new(MapSafeCode(status, fallback), status == HttpStatusCode.TooManyRequests || (int)status >= 500);
-
-    private static string MapSafeCode(HttpStatusCode status, string fallback) => status switch
+    private async Task<YouTubeProviderException> MapFailureAsync(
+        HttpResponseMessage response,
+        string fallback,
+        CancellationToken cancellationToken)
     {
-        HttpStatusCode.TooManyRequests => "youtube_rate_limited",
-        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "youtube_auth_or_scope_rejected",
-        _ when (int)status >= 500 => "youtube_temporary_unavailable",
-        _ => fallback,
-    };
+        var reason = await TryReadErrorReasonAsync(response, cancellationToken).ConfigureAwait(false);
+        var mapping = MapSafeFailure(response.StatusCode, reason, fallback);
+        return new(mapping.SafeCode, mapping.Retryable);
+    }
+
+    private static YouTubeFailureMapping MapSafeFailure(HttpStatusCode status, string? reason, string fallback)
+    {
+        var byReason = reason switch
+        {
+            "rateLimitExceeded" or "userRateLimitExceeded" => new YouTubeFailureMapping("youtube_rate_limited", true),
+            "quotaExceeded" or "dailyLimitExceeded" => new YouTubeFailureMapping("youtube_quota_exceeded", false),
+            "uploadLimitExceeded" => new YouTubeFailureMapping("youtube_upload_limit_exceeded", false),
+            "insufficientPermissions" or "authError" => new YouTubeFailureMapping("youtube_auth_or_scope_rejected", false),
+            "forbiddenPrivacySetting" or "forbiddenLicenseSetting" => new YouTubeFailureMapping("youtube_policy_rejected", false),
+            "channelSuspended" => new YouTubeFailureMapping("youtube_channel_suspended", false),
+            "forbidden" => new YouTubeFailureMapping("youtube_forbidden", false),
+            "mediaBodyRequired" => new YouTubeFailureMapping("youtube_invalid_input", false),
+            not null when reason.StartsWith("invalid", StringComparison.Ordinal) => new YouTubeFailureMapping("youtube_invalid_input", false),
+            _ => null,
+        };
+        if (byReason is not null) return byReason;
+        if (status == HttpStatusCode.TooManyRequests) return new("youtube_rate_limited", true);
+        if (status == HttpStatusCode.Unauthorized) return new("youtube_auth_or_scope_rejected", false);
+        if (status == HttpStatusCode.Forbidden) return new("youtube_forbidden", false);
+        if ((int)status >= 500) return new("youtube_temporary_unavailable", true);
+        return new(fallback, false);
+    }
+
+    private static async Task<string?> TryReadErrorReasonAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+            if (bytes.Length == 0) return null;
+            var envelope = JsonSerializer.Deserialize<GoogleApiErrorEnvelope>(bytes);
+            return envelope?.Error?.Errors?
+                .Select(error => error.Reason)
+                .FirstOrDefault(reason => !string.IsNullOrWhiteSpace(reason));
+        }
+        catch (Exception ex) when (ex is JsonException or YouTubeProviderException)
+        {
+            return null;
+        }
+    }
 
     private static async Task<byte[]> ReadBoundedAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
@@ -354,6 +407,9 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
     }
 }
 
+internal sealed record GoogleApiErrorEnvelope([property: JsonPropertyName("error")] GoogleApiError? Error);
+internal sealed record GoogleApiError([property: JsonPropertyName("errors")] List<GoogleApiErrorDetail>? Errors);
+internal sealed record GoogleApiErrorDetail([property: JsonPropertyName("reason")] string? Reason);
 internal sealed record YouTubeTokenResponse(
     [property: JsonPropertyName("access_token")] string AccessToken,
     [property: JsonPropertyName("expires_in")] int ExpiresIn,
@@ -371,7 +427,11 @@ internal sealed record YouTubeInsertRequest(
 internal sealed record YouTubeSnippetWrite(
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("description")] string Description);
-internal sealed record YouTubeStatusWrite([property: JsonPropertyName("privacyStatus")] string PrivacyStatus);
+internal sealed record YouTubeStatusWrite(
+    [property: JsonPropertyName("privacyStatus")] string PrivacyStatus,
+    [property: JsonPropertyName("selfDeclaredMadeForKids")] bool SelfDeclaredMadeForKids,
+    [property: JsonPropertyName("containsSyntheticMedia")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? ContainsSyntheticMedia);
 internal sealed record YouTubeVideosEnvelope([property: JsonPropertyName("items")] List<YouTubeVideoItem>? Items);
 internal sealed record YouTubeVideoItem(
     [property: JsonPropertyName("id")] string Id,
@@ -389,7 +449,9 @@ internal sealed record YouTubeVideoStatus(
     [property: JsonPropertyName("publicStatsViewable")] bool? PublicStatsViewable,
     [property: JsonPropertyName("selfDeclaredMadeForKids")] bool? SelfDeclaredMadeForKids,
     [property: JsonPropertyName("containsSyntheticMedia")] bool? ContainsSyntheticMedia);
-internal sealed record YouTubeProcessingDetails([property: JsonPropertyName("processingStatus")] string? ProcessingStatus);
+internal sealed record YouTubeProcessingDetails(
+    [property: JsonPropertyName("processingStatus")] string? ProcessingStatus,
+    [property: JsonPropertyName("processingFailureReason")] string? ProcessingFailureReason);
 internal sealed record YouTubeSuggestions([property: JsonPropertyName("processingErrors")] List<string>? ProcessingErrors);
 internal sealed record YouTubeVideoObservation(
     string VideoId, YouTubeVideoStatus Status, YouTubeProcessingDetails? ProcessingDetails, YouTubeSuggestions? Suggestions);
@@ -413,6 +475,7 @@ internal sealed record YouTubeCheckpoint(
     string Stage = "new",
     YouTubeStatusSnapshot? Status = null,
     DateTimeOffset? StatusCheckedAt = null);
+internal sealed record YouTubeOptions(bool MadeForKids = false, bool? ContainsSyntheticMedia = null);
 internal sealed record YouTubePlan(
     Guid AccountId,
     string Operation,
@@ -420,6 +483,7 @@ internal sealed record YouTubePlan(
     string Title,
     string Description,
     string Visibility,
+    YouTubeOptions Options,
     YouTubeCheckpoint Checkpoint);
 
 internal sealed class YouTubeAuthProvider(YouTubeApiClient client, TimeProvider timeProvider) : IInteractiveAuthProvider
@@ -487,9 +551,10 @@ internal sealed class YouTubeAuthProvider(YouTubeApiClient client, TimeProvider 
 
     private static void ValidateRedirect(Uri redirectUri)
     {
-        var validHost = IPAddress.TryParse(redirectUri.Host, out var address) && IPAddress.IsLoopback(address);
+        var validHost = IPAddress.TryParse(redirectUri.Host, out var address) &&
+            (address.Equals(IPAddress.Loopback) || address.Equals(IPAddress.IPv6Loopback));
         if (!redirectUri.IsAbsoluteUri || !string.Equals(redirectUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) || !validHost)
-            throw new ArgumentException("YouTube Desktop OAuth redirect must use an explicit HTTP loopback IP address.");
+            throw new ArgumentException("YouTube Desktop OAuth redirect must use 127.0.0.1 or ::1 over HTTP.");
         if (redirectUri.IsDefaultPort) throw new ArgumentException("YouTube OAuth redirect must include the loopback listener port.");
     }
 
@@ -522,8 +587,8 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
               string.Equals(asset.DetectedMime, "application/octet-stream", StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException("YouTube video must be a supported video MIME type and no larger than 256 GB.");
         var title = content.Title;
-        if (string.IsNullOrWhiteSpace(title) || title.Length > 100 || title.Contains('<') || title.Contains('>'))
-            throw new ArgumentException("YouTube title must contain 1 to 100 characters and no angle brackets.");
+        if (string.IsNullOrWhiteSpace(title) || title.EnumerateRunes().Count() > 100 || title.Contains('<') || title.Contains('>'))
+            throw new ArgumentException("YouTube title must contain 1 to 100 Unicode scalar values and no angle brackets.");
         var description = content.Text ?? string.Empty;
         if (Encoding.UTF8.GetByteCount(description) > 5000 || description.Contains('<') || description.Contains('>'))
             throw new ArgumentException("YouTube description must be at most 5000 UTF-8 bytes and contain no angle brackets.");
@@ -531,9 +596,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
             throw new NotSupportedException("YouTube visibility must be private, unlisted, or public.");
         if (!string.Equals(target.OptionsSchema, "youtube-options/v1", StringComparison.Ordinal) || target.OptionsVersion != 1)
             throw new ArgumentException("YouTube requires youtube-options/v1 options version 1.");
-        using var options = JsonDocument.Parse(target.CanonicalOptionsJson);
-        if (options.RootElement.ValueKind != JsonValueKind.Object || options.RootElement.EnumerateObject().Any())
-            throw new ArgumentException("YouTube Phase 3 options must currently be an empty object.");
+        _ = ParseOptions(target.CanonicalOptionsJson);
     }
 
     public Task<ProviderStep> PlanNextStepAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken)
@@ -633,7 +696,8 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
 
     private async Task<StepResult> StartAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
     {
-        var session = await client.StartResumableUploadAsync(token, plan.Asset, plan.Title, plan.Description, cancellationToken).ConfigureAwait(false);
+        var session = await client.StartResumableUploadAsync(
+            token, plan.Asset, plan.Title, plan.Description, plan.Options, cancellationToken).ConfigureAwait(false);
         var next = plan.Checkpoint with { SessionUri = session.AbsoluteUri, NextOffset = 0, NeedsStatusQuery = false, Stage = "uploading" };
         return Progress(next);
     }
@@ -700,8 +764,11 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
             return Reject(KnownReason("youtube_upload_rejected", observed.Status.RejectionReason), FailureCategory.Provider);
         if (string.Equals(processing, "failed", StringComparison.Ordinal))
         {
-            var reason = observed.Suggestions?.ProcessingErrors?.FirstOrDefault();
-            return Reject(KnownReason("youtube_processing_failed", reason), FailureCategory.InvalidInput);
+            var officialReason = observed.ProcessingDetails?.ProcessingFailureReason;
+            var diagnosticReason = observed.Suggestions?.ProcessingErrors?.FirstOrDefault();
+            var reason = officialReason ?? diagnosticReason;
+            var category = officialReason is null ? FailureCategory.InvalidInput : FailureCategory.Provider;
+            return Reject(KnownReason("youtube_processing_failed", reason), category, PublicationState.NeedsAttention);
         }
         if (string.Equals(processing, "terminated", StringComparison.Ordinal))
             return Reject("youtube_processing_terminated", FailureCategory.Provider, PublicationState.NeedsAttention);
@@ -745,19 +812,55 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         if (result.RetryAt is not null)
             return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(plan.Checkpoint),
                 SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
-        var observed = string.Equals(result.SafeError, "youtube_auth_or_scope_rejected", StringComparison.Ordinal)
-            ? PublicationState.NeedsAttention
-            : (PublicationState?)null;
-        return Reject(result.SafeError ?? "youtube_publish_rejected", Classify(result.SafeError), observed);
+        return Reject(result.SafeError ?? "youtube_publish_rejected", Classify(result.SafeError), AttentionState(result.SafeError));
     }
 
     private ProviderStep Step(ProviderPublication input, string operation, StepEffect effect, ReplaySafety replay, YouTubeCheckpoint state)
     {
         var plan = new YouTubePlan(input.Publication.AccountId, operation, input.Content.MediaAssets[0], input.Content.Title!,
-            input.Content.Text ?? string.Empty, input.Target.Visibility, state);
+            input.Content.Text ?? string.Empty, input.Target.Visibility, ParseOptions(input.Target.CanonicalOptionsJson), state);
         var opaque = JsonSerializer.Serialize(plan);
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(opaque)));
         return new($"youtube.{operation}.v1", effect, replay, digest, timeProvider.GetUtcNow(), OpaquePlan: opaque);
+    }
+
+    private static YouTubeOptions ParseOptions(string canonicalOptionsJson)
+    {
+        try
+        {
+            using var options = JsonDocument.Parse(canonicalOptionsJson);
+            if (options.RootElement.ValueKind != JsonValueKind.Object)
+                throw new ArgumentException("YouTube options must be a JSON object.");
+            var madeForKids = false;
+            bool? containsSyntheticMedia = null;
+            foreach (var property in options.RootElement.EnumerateObject())
+            {
+                switch (property.Name)
+                {
+                    case "madeForKids":
+                        if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                            throw new ArgumentException("YouTube madeForKids must be boolean.");
+                        madeForKids = property.Value.GetBoolean();
+                        break;
+                    case "containsSyntheticMedia":
+                        if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                            throw new ArgumentException("YouTube containsSyntheticMedia must be boolean.");
+                        containsSyntheticMedia = property.Value.GetBoolean();
+                        break;
+                    case "uploadNoticeAcknowledged":
+                        if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                            throw new ArgumentException("YouTube uploadNoticeAcknowledged must be boolean.");
+                        break;
+                    default:
+                        throw new ArgumentException($"Unknown YouTube option '{property.Name}'.");
+                }
+            }
+            return new(madeForKids, containsSyntheticMedia);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException("YouTube options JSON is invalid.", ex);
+        }
     }
 
     private static bool TryCheckpoint(string? value, out YouTubeCheckpoint checkpoint)
@@ -781,10 +884,18 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
 
     private static StepResult ProviderFailure(YouTubeProviderException ex) => ex.Retryable
         ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, FailureCategory: Classify(ex.SafeCode))
-        : Reject(ex.SafeCode, Classify(ex.SafeCode), Classify(ex.SafeCode) == FailureCategory.Authentication ? PublicationState.NeedsAttention : null);
+        : Reject(ex.SafeCode, Classify(ex.SafeCode), AttentionState(ex.SafeCode));
 
     private static StepResult Reject(string safeError, FailureCategory category, PublicationState? observedState = null) =>
         new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: safeError, ObservedState: observedState, FailureCategory: category);
+
+    private static PublicationState? AttentionState(string? safeCode) => safeCode switch
+    {
+        "youtube_auth_or_scope_rejected" or "youtube_reconnect_required" or "auth_required" or "credential_unavailable" or
+        "youtube_quota_exceeded" or "youtube_upload_limit_exceeded" or "youtube_policy_rejected" or
+        "youtube_channel_suspended" or "youtube_forbidden" => PublicationState.NeedsAttention,
+        _ => null,
+    };
 
     private static string KnownReason(string prefix, string? reason)
     {
@@ -795,12 +906,13 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
 
     private static FailureCategory Classify(string? safeCode) => safeCode switch
     {
-        "youtube_rate_limited" => FailureCategory.RateLimit,
+        "youtube_rate_limited" or "youtube_quota_exceeded" or "youtube_upload_limit_exceeded" => FailureCategory.RateLimit,
         "youtube_network_unavailable" or "youtube_temporary_unavailable" or "youtube_upload_session_expired" or
             "youtube_upload_response_uncertain" or "youtube_upload_no_progress" => FailureCategory.Network,
         "youtube_auth_or_scope_rejected" or "youtube_token_rejected" or "youtube_reconnect_required" or
             "auth_required" or "credential_unavailable" => FailureCategory.Authentication,
-        "media_integrity_mismatch" or "media_unavailable" or "youtube_upload_offset_invalid" or "youtube_checkpoint_invalid" => FailureCategory.InvalidInput,
+        "youtube_invalid_input" or "media_integrity_mismatch" or "media_unavailable" or
+            "youtube_upload_offset_invalid" or "youtube_checkpoint_invalid" => FailureCategory.InvalidInput,
         "youtube_publish_malformed_success" or "youtube_publish_server_uncertain" or "youtube_publish_not_observed" => FailureCategory.Unknown,
         _ => FailureCategory.Provider,
     };
