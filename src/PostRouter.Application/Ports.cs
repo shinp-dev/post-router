@@ -123,7 +123,7 @@ public interface IAuthProvider
 
 public interface IInteractiveAuthProvider : IAuthProvider
 {
-    AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? alias = null);
+    AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? requestedAlias = null);
     Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken);
     Task RevokeAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken);
 }

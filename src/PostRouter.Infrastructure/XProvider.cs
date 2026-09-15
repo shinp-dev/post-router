@@ -207,7 +207,7 @@ public sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) 
     public const string RequiredScope = "tweet.read tweet.write users.read offline.access";
     public string ProviderKey => "x";
 
-    public AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? alias = null)
+    public AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? requestedAlias = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
         ValidateLoopbackRedirect(redirectUri);
@@ -221,7 +221,7 @@ public sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) 
         };
         var encoded = string.Join("&", query.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
         return new(ProviderKey, clientId, redirectUri, new Uri($"https://x.com/i/oauth2/authorize?{encoded}"), state, verifier,
-            RequiredScope, expectedAccountId, expectedSubject, alias);
+            RequiredScope, expectedAccountId, expectedSubject, requestedAlias);
     }
 
     public async Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken)

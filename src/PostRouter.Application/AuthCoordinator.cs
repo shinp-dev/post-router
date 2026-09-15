@@ -68,7 +68,7 @@ public sealed class AccountConnectionService(
     public AuthorizationSession BeginConnect(string providerKey, string clientId, Uri redirectUri, string? alias = null)
     {
         var provider = GetProvider(providerKey);
-        return provider.BeginAuthorization(clientId, redirectUri, alias: alias);
+        return provider.BeginAuthorization(clientId, redirectUri, requestedAlias: alias);
     }
 
     public async Task<AuthorizationSession> BeginReconnectAsync(Guid accountId, Uri redirectUri, CancellationToken cancellationToken = default)
