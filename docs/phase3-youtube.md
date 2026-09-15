@@ -12,6 +12,7 @@ Provider固有の公開方法はYouTube Adapterへ閉じ込め、公開前の人
 
 - resumable uploadはsession開始POSTで`Location` URIを取得し、そのURIへPUTする。
 - upload中断後は同じsession URIへ空PUT + `Content-Range: bytes */TOTAL`で状態を確認でき、`308 Resume Incomplete`の`Range`から受領済みbyteを判定できる。
+- 中断したPUTについてclientは「全部届いた」「何も届いていない」のどちらも仮定せず、server側offsetを照会してから再開する。
 - session URIが失効した場合は404となり、新しいresumable sessionを開始して最初からuploadし直す。
 - upload完了時はvideo resourceとvideo IDを得る。
 - `videos.list`の`processingDetails.processingStatus`はprocessing progressのpoll用途として公式に定義されている。
@@ -41,6 +42,7 @@ Desktop App OAuth 2.0 + PKCE S256を使用する。
 - system browser
 - explicit loopback IP redirect
 - `access_type=offline`
+- refresh tokenが必要な接続/reconnectで再同意を明示するため`prompt=consent`
 - scopeは`https://www.googleapis.com/auth/youtube.force-ssl`
 - refresh tokenを既存vaultへ保存
 - `channels.list(mine=true)`で得たYouTube channel IDをremote subjectとしてAccountへ保存
@@ -53,10 +55,13 @@ installed appはclient secretを安全に保持できない前提なので、cli
 1. spool済み動画のsize/SHA-256を送信前に再検証する。
 2. metadataはprivateでresumable sessionを開始する。
 3. session URIはGoogle upload host allowlistを検証したうえで暗号化provider checkpointへ保存する。
-4. 通常は残りfile rangeをstreaming PUTする。動画全体をメモリへ読み込まない。
-5. network loss / crash後はsession status queryでoffsetを確認し、未送信rangeだけを再開する。
-6. session 404は公開副作用のない失効として新sessionから再構築する。
-7. upload完了でvideo IDを取得し、必ずdurable checkpointしてからprocessing確認へ進む。
+4. data PUTの直前に同じsessionへstatus queryを行い、server側の確定offsetを取得する。
+5. 取得したoffsetから残りfile rangeだけをstreaming PUTする。動画全体をメモリへ読み込まない。
+6. network loss / process crash後も同じ「status query → remaining PUT」を再実行するため、古いlocal offsetをblind resendしない。
+7. session 404は公開副作用のない失効として新sessionから再構築する。
+8. upload完了でvideo IDを取得し、必ずdurable checkpointしてからprocessing確認へ進む。
+
+registered runtimeでは`YouTubeResumeSafeAdapter`がresumable PUTを上記のquery-first unitに包む。coreが`ResumeKnownHandle`のabandoned claimを再queueしても、再実行時にremote offsetを照会してからdataを送るため、crash後のbyte重複/欠落をlocal推測に依存しない。
 
 通常progressとfailure retry budgetを混同しない。成功したresumable progressとprocessing pollは`ConsumesRetryBudget=false`として、通信失敗等だけがfailure retry budgetを消費する。
 
@@ -83,7 +88,7 @@ processing pollは正常進行であり、publication failure retryとは区別�
 - `RequireApproval`: `AwaitingApproval`で停止し、承認後に同じvideo IDへの公開stepを再開する。
 - 承認待ちが長引いてstatus snapshotが古くなった場合は、公開前に再取得してからupdateする。
 
-public/unlisted updateのresponseを失った場合、新しい動画を作成しない。既知video IDをGETし、目的visibilityになっていればPublishedへ確定する。目的visibilityでない場合は自動的に別動画を作ったりblind updateせず、同じIDのread reconciliationを継続する。
+public/unlisted updateのresponseを失った場合、新しい動画を作成しない。既知video IDをGETし、目的visibilityになっていればPublishedへ確定する。目的visibilityでない場合は自動的に別動画を作ったりblind updateしない。同じIDのread reconciliationだけを行い、目的状態を確認できない状態がfailure retry上限まで続いた場合は`NeedsAttention`へ止める。
 
 ### Scheduling scope
 
@@ -106,7 +111,7 @@ YouTube native `status.publishAt`は仕様上利用可能だが、事前upload�
 | OAuth identity/read | ReadOnly | SafeRead |
 | resumable session開始 | CreateRemoteObject / 非公開 | SafeRepeatNoPublication。応答喪失時に孤児session/private objectが残り得るが公開は起きない |
 | session status query | ReadOnly | SafeRead |
-| file PUT / resume | UploadOnly | ResumeKnownHandle |
+| query-first file PUT / resume | UploadOnly | ResumeKnownHandle。毎回remote offsetを再確認してからremaining rangeのみ送る |
 | processing poll | ReadOnly | SafeRead |
 | known video IDのpublic/unlisted update | MayPublish | IdempotentExistingObject + known ID reconciliation |
 
@@ -126,7 +131,7 @@ Phase 3Aでは次をadapterで検証する。
 
 ## Acceptance boundary
 
-CIではfake HTTPによりOAuth、resumable recovery、processing分類、approval gate、status update/reconcileを検証する。
+CIではfake HTTPによりOAuth、refresh-token再同意条件、resumable recovery、abandoned-claim後のremote offset query、session失効再構築、processing progress/failure、approval gate、rate-limit、status update/reconcileを検証する。
 
 本番対応済みと呼ぶには別途以下が必要。
 
