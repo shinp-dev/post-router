@@ -46,6 +46,7 @@ public sealed class YouTubeFailureMatrixTests
         {
             Assert.Equal(1, await setup.Worker.RunOnceAsync());
             var queue = Assert.Single(await setup.Posts.QueueAsync());
+            Assert.Equal(JobKind.Poll, queue.Kind);
             Assert.Equal(0, queue.AttemptNo);
             context.Time.Advance(TimeSpan.FromSeconds(31));
         }
@@ -321,7 +322,7 @@ public sealed class YouTubeFailureMatrixTests
         var account = await SaveConnectionAsync(context);
         IProviderAdapter adapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(auth, client, context.Time), context.Time);
         var registry = new ProviderRegistry([adapter]);
-        var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time, context.Database);
+        var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time);
         var posts = new PostService(applicationStore, context.Gate, registry, context.Time);
         var worker = new WorkerService(applicationStore, registry,
             new FileWorkerLockFactory(Path.Combine(context.Directory, "youtube-matrix-worker.lock")), context.Gate, context.Time,
