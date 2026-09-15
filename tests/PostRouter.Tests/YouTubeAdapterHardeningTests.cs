@@ -142,6 +142,36 @@ public sealed class YouTubeAdapterHardeningTests
     }
 
     [Fact]
+    public async Task Publish_stops_if_remote_native_schedule_is_present()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var updates = 0;
+        using var http = Client((request, _, _) =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return Task.FromResult(ProcessedWithPublishAt(
+                    "video-native-schedule", "private", context.Time.GetUtcNow().AddHours(2)));
+            Interlocked.Increment(ref updates);
+            return Task.FromResult(Json(HttpStatusCode.OK, "{}"));
+        });
+        var setup = await BuildAsync(context, http);
+        var checkpoint = new YouTubeCheckpoint(
+            VideoId: "video-native-schedule",
+            Stage: "ready",
+            Status: new YouTubeStatusSnapshot("private", true, "youtube", true, false, null),
+            StatusCheckedAt: context.Time.GetUtcNow());
+        var plan = Plan(setup.Account.AccountId, checkpoint) with { Operation = "publish", Visibility = "public" };
+        var step = Step("youtube.publish.v1", plan, context.Time.GetUtcNow(), StepEffect.MayPublish, ReplaySafety.IdempotentExistingObject);
+
+        var result = await setup.Adapter.ExecuteStepAsync(step, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Rejected, result.Outcome);
+        Assert.Equal(PublicationState.NeedsAttention, result.ObservedState);
+        Assert.Equal("youtube_native_schedule_present", result.SafeError);
+        Assert.Equal(0, updates);
+    }
+
+    [Fact]
     public async Task Processing_poll_has_a_durable_operational_deadline()
     {
         await using var context = await TestContext.CreateAsync();
@@ -193,7 +223,8 @@ public sealed class YouTubeAdapterHardeningTests
             new FileAuthGrantLockFactory(Path.Combine(context.Directory, "youtube-hardening-auth-locks")),
             context.Gate, [authProvider], context.Time);
         var account = await SaveConnectionAsync(context);
-        var adapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(auth, client, context.Time), context.Time);
+        var adapter = new YouTubeResumeSafeAdapter(
+            new YouTubeProviderAdapter(auth, client, context.Time), context.Time, auth, client);
         return new(account, adapter);
     }
 
@@ -212,6 +243,9 @@ public sealed class YouTubeAdapterHardeningTests
 
     private static HttpResponseMessage Processed(string id, string privacy) => Json(HttpStatusCode.OK,
         $"{{\"items\":[{{\"id\":\"{id}\",\"status\":{{\"uploadStatus\":\"processed\",\"privacyStatus\":\"{privacy}\",\"embeddable\":true,\"license\":\"youtube\",\"publicStatsViewable\":true}},\"processingDetails\":{{\"processingStatus\":\"succeeded\"}}}}]}}");
+
+    private static HttpResponseMessage ProcessedWithPublishAt(string id, string privacy, DateTimeOffset publishAt) => Json(HttpStatusCode.OK,
+        $"{{\"items\":[{{\"id\":\"{id}\",\"status\":{{\"uploadStatus\":\"processed\",\"privacyStatus\":\"{privacy}\",\"publishAt\":\"{publishAt:O}\",\"embeddable\":true,\"license\":\"youtube\",\"publicStatsViewable\":true}},\"processingDetails\":{{\"processingStatus\":\"succeeded\"}}}}]}}");
 
     private static HttpClient Client(Func<HttpRequestMessage, int, CancellationToken, Task<HttpResponseMessage>> response) =>
         new(new StubHandler(response)) { BaseAddress = new Uri("http://127.0.0.1/") };
