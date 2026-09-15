@@ -41,6 +41,7 @@ public static class CanonicalIntent
                 writer.WriteStartObject();
                 writer.WriteString("accountId", target.AccountId);
                 writer.WriteString("visibility", target.Visibility);
+                writer.WriteString("approvalPolicy", target.ApprovalPolicy.ToString());
                 writer.WriteString("optionsSchema", target.OptionsSchema);
                 writer.WriteNumber("optionsVersion", target.OptionsVersion);
                 writer.WritePropertyName("options");
