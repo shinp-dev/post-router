@@ -74,6 +74,42 @@ public sealed class XProviderTests
     }
 
     [Fact]
+    public async Task Image_post_uploads_media_then_creates_post_through_durable_checkpoint()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "image.jpg");
+        await File.WriteAllBytesAsync(imagePath, [0xff, 0xd8, 0xff, 0x01]);
+        using var http = Client(async (request, call, cancellationToken) =>
+        {
+            if (call == 1)
+            {
+                Assert.Equal("/2/media/upload", request.RequestUri?.AbsolutePath);
+                var upload = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+                Assert.Contains((byte)0xff, upload);
+                return Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"media-1\"}}");
+            }
+            Assert.Equal("/2/tweets", request.RequestUri?.AbsolutePath);
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Assert.Contains("media-1", body);
+            return Json(HttpStatusCode.Created, "{\"data\":{\"id\":\"123\"}}");
+        });
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var asset = new MediaAsset(Guid.NewGuid(), "hash", 4, "image/jpeg", imagePath);
+        var intent = new CanonicalPostIntent("x-image", new Content(Guid.NewGuid(), ContentKind.ImageSet, "caption", null, [asset]),
+            [new TargetIntent(setup.Account.AccountId, "x", "public", "x-options/v1", 1, "{}", "x-test")],
+            new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(15)));
+        var queued = await setup.Posts.EnqueueAsync(intent);
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.Ready, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        var saved = await setup.Posts.GetAsync(queued.PostId);
+        Assert.Equal(PublicationState.Published, Assert.Single(saved!.Publications).State);
+        Assert.Equal("123", Assert.Single(saved.RemoteObjects).ProviderObjectId);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Disconnect_keeps_queue_but_blocks_send_until_same_remote_account_reconnects()
     {
         await using var context = await TestContext.CreateAsync();

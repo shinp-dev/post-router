@@ -68,10 +68,34 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
         catch (JsonException ex) { throw new XProviderException("x_identity_malformed", false, ex); }
     }
 
-    public async Task<XCreatePostResult> CreateTextPostAsync(string accessToken, string text, CancellationToken cancellationToken)
+    public async Task<string> UploadImageAsync(string accessToken, string path, CancellationToken cancellationToken)
+    {
+        using var request = Authorized(HttpMethod.Post, Endpoint("2/media/upload"), accessToken);
+        using var form = new MultipartFormDataContent();
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var media = new StreamContent(stream);
+        media.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+        form.Add(media, "media", Path.GetFileName(path));
+        form.Add(new StringContent("tweet_image"), "media_category");
+        request.Content = form;
+        using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) throw MapSafeFailure(response.StatusCode, "x_media_upload_rejected");
+        var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var value = JsonSerializer.Deserialize<XMediaEnvelope>(bytes);
+            if (string.IsNullOrWhiteSpace(value?.Data?.Id)) throw new XProviderException("x_media_upload_malformed", false);
+            return value.Data.Id;
+        }
+        catch (JsonException ex) { throw new XProviderException("x_media_upload_malformed", false, ex); }
+    }
+
+    public async Task<XCreatePostResult> CreateTextPostAsync(string accessToken, string text, IReadOnlyList<string>? mediaIds, CancellationToken cancellationToken)
     {
         using var request = Authorized(HttpMethod.Post, Endpoint("2/tweets"), accessToken);
-        request.Content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(new XCreatePostRequest(text)));
+        request.Content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(new XCreatePostRequest(
+            text, mediaIds is { Count: > 0 } ? new XCreatePostMedia(mediaIds) : null)));
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         HttpResponseMessage response;
         try { response = await SendAsync(request, cancellationToken).ConfigureAwait(false); }
@@ -178,7 +202,12 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
         return buffer.ToArray();
     }
 
-    private sealed record XCreatePostRequest([property: JsonPropertyName("text")] string Text);
+    private sealed record XCreatePostRequest(
+        [property: JsonPropertyName("text")] string Text,
+        [property: JsonPropertyName("media")] XCreatePostMedia? Media);
+    private sealed record XCreatePostMedia([property: JsonPropertyName("media_ids")] IReadOnlyList<string> MediaIds);
+    private sealed record XMediaEnvelope([property: JsonPropertyName("data")] XMedia? Data);
+    private sealed record XMedia([property: JsonPropertyName("id")] string Id);
     private sealed record XPostEnvelope([property: JsonPropertyName("data")] XPost? Data);
     private sealed record XPost([property: JsonPropertyName("id")] string Id);
     private sealed record XUserEnvelope([property: JsonPropertyName("data")] XUser? Data);
@@ -276,13 +305,18 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
 {
     public string ProviderKey => "x";
     public ProviderCapabilities Capabilities { get; } = new(
-        "x", [ContentKind.TextOnly], ["public"], "x-options/v1", 1, "{}", true, true);
+        "x", [ContentKind.TextOnly, ContentKind.ImageSet], ["public"], "x-options/v1", 1, "{}", true, true);
     public bool RequiresConnectedAccount => true;
 
     public void Validate(Content content, TargetIntent target)
     {
-        if (content.Kind != ContentKind.TextOnly || content.MediaAssets.Count != 0)
-            throw new NotSupportedException("Phase 2A X supports text-only posts.");
+        if (content.Kind is not ContentKind.TextOnly and not ContentKind.ImageSet)
+            throw new NotSupportedException("X supports text-only and JPEG image posts in this phase.");
+        if (content.Kind == ContentKind.TextOnly && content.MediaAssets.Count != 0)
+            throw new ArgumentException("Text-only X posts cannot contain media.");
+        if (content.Kind == ContentKind.ImageSet && (content.MediaAssets.Count is < 1 or > 4 ||
+            content.MediaAssets.Any(asset => asset.DetectedMime != "image/jpeg" || asset.SizeBytes > 5L * 1024 * 1024)))
+            throw new ArgumentException("X image posts require one to four JPEG files, each at most 5 MB.");
         if (!string.Equals(target.Visibility, "public", StringComparison.OrdinalIgnoreCase))
             throw new NotSupportedException("Phase 2A X supports public visibility only.");
         if (!string.Equals(target.OptionsSchema, "x-options/v1", StringComparison.Ordinal) || target.OptionsVersion != 1)
@@ -297,10 +331,16 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
     public Task<ProviderStep> PlanNextStepAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken)
     {
         Validate(input.Content, input.Target);
-        var text = input.Content.Text!;
-        var plan = JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, text));
+        var mediaState = ParseCheckpoint(checkpoint);
+        var remaining = input.Content.MediaAssets.Skip(mediaState.MediaIds.Count).FirstOrDefault();
+        var plan = remaining is not null
+            ? JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "upload-image", remaining.StorageRef, mediaState.MediaIds))
+            : JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "create-post", null, mediaState.MediaIds));
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(plan)));
-        return Task.FromResult(new ProviderStep("x.create-post.v1", StepEffect.MayPublish, ReplaySafety.NotReplayable, digest, timeProvider.GetUtcNow(), OpaquePlan: plan));
+        var uploading = remaining is not null;
+        return Task.FromResult(new ProviderStep(uploading ? $"x.upload-image.{mediaState.MediaIds.Count}.v1" : "x.create-post.v2",
+            uploading ? StepEffect.UploadOnly : StepEffect.MayPublish, ReplaySafety.NotReplayable, digest,
+            timeProvider.GetUtcNow(), OpaquePlan: plan));
     }
 
     public async Task<StepResult> ExecuteStepAsync(ProviderStep providerStep, CancellationToken cancellationToken)
@@ -326,7 +366,25 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
             return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "credential_unavailable", ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.Authentication);
         }
 
-        var result = await client.CreateTextPostAsync(token.AccessToken, plan.Text, cancellationToken).ConfigureAwait(false);
+        if (plan.Operation == "upload-image")
+        {
+            if (string.IsNullOrWhiteSpace(plan.MediaPath) || !File.Exists(plan.MediaPath))
+                return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "media_unavailable", FailureCategory: FailureCategory.InvalidInput);
+            try
+            {
+                var mediaId = await client.UploadImageAsync(token.AccessToken, plan.MediaPath, cancellationToken).ConfigureAwait(false);
+                var next = new XMediaCheckpoint([.. plan.MediaIds, mediaId]);
+                return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(next), RetryAt: timeProvider.GetUtcNow());
+            }
+            catch (XProviderException ex)
+            {
+                return ex.Retryable
+                    ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, FailureCategory: Classify(ex.SafeCode))
+                    : new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, FailureCategory: Classify(ex.SafeCode));
+            }
+        }
+
+        var result = await client.CreateTextPostAsync(token.AccessToken, plan.Text, plan.MediaIds, cancellationToken).ConfigureAwait(false);
         if (result.Success) return new(StepOutcome.Completed, EffectCertainty.Confirmed, result.PostId, ObservedState: PublicationState.Published);
         if (result.Ambiguous) return new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: result.SafeError, FailureCategory: Classify(result.SafeError));
         if (result.RetryAt is not null) return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
@@ -351,5 +409,13 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
         _ => FailureCategory.Provider,
     };
 
-    private sealed record XPublishPlan(Guid AccountId, string Text);
+    private static XMediaCheckpoint ParseCheckpoint(string? checkpoint)
+    {
+        if (string.IsNullOrWhiteSpace(checkpoint)) return new([]);
+        try { return JsonSerializer.Deserialize<XMediaCheckpoint>(checkpoint) ?? new([]); }
+        catch (JsonException) { throw new InvalidDataException("X media checkpoint is malformed."); }
+    }
+
+    private sealed record XPublishPlan(Guid AccountId, string Text, string Operation, string? MediaPath, IReadOnlyList<string> MediaIds);
+    private sealed record XMediaCheckpoint(IReadOnlyList<string> MediaIds);
 }
