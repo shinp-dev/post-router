@@ -43,6 +43,8 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
     private static readonly TimeSpan ProcessingDeadline = TimeSpan.FromDays(7);
     private readonly YouTubeProviderAdapter _inner;
     private readonly TimeProvider _timeProvider;
+    private readonly AuthCoordinator? _auth;
+    private readonly YouTubeApiClient? _client;
 
     public YouTubeResumeSafeAdapter(YouTubeProviderAdapter inner)
         : this(inner, TimeProvider.System)
@@ -50,9 +52,20 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
     }
 
     public YouTubeResumeSafeAdapter(YouTubeProviderAdapter inner, TimeProvider timeProvider)
+        : this(inner, timeProvider, null, null)
+    {
+    }
+
+    public YouTubeResumeSafeAdapter(
+        YouTubeProviderAdapter inner,
+        TimeProvider timeProvider,
+        AuthCoordinator? auth,
+        YouTubeApiClient? client)
     {
         _inner = inner;
         _timeProvider = timeProvider;
+        _auth = auth;
+        _client = client;
         Capabilities = inner.Capabilities with
         {
             DefaultOptionsJson = "{\"madeForKids\":false,\"uploadNoticeAcknowledged\":false}",
@@ -161,8 +174,15 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
                 Checkpoint: queryResult.Checkpoint, SafeError: "youtube_resume_offset_invalid",
                 ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.InvalidInput);
 
-        var uploadStep = BuildStep(providerStep, plan with { Operation = "upload", Checkpoint = remote }, "youtube.upload.v1",
+        var uploadPlan = plan with { Operation = "upload", Checkpoint = remote };
+        var uploadStep = BuildStep(providerStep, uploadPlan, "youtube.upload.v1",
             StepEffect.UploadOnly, ReplaySafety.ResumeKnownHandle);
+
+        // Production is currently Windows-only. Keep a read/share-read handle open while the inner
+        // adapter verifies and reopens the spool object, preventing replacement or write access in
+        // the small verify-to-upload handoff window on Windows. The inner SHA/size verification is
+        // still authoritative and runs immediately before the data PUT.
+        await using var mediaGuard = TryOpenMediaGuard(uploadPlan.Asset);
         return await _inner.ExecuteStepAsync(uploadStep, cancellationToken).ConfigureAwait(false);
     }
 
@@ -192,7 +212,7 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
     private async Task<StepResult> ExecuteVerifiedPrivateAsync(ProviderStep providerStep, CancellationToken cancellationToken)
     {
         if (!TryPlan(providerStep, out var plan, out var invalid)) return invalid!;
-        var refreshed = await RefreshStatusAsync(providerStep, plan, cancellationToken).ConfigureAwait(false);
+        var refreshed = await RefreshBoundaryStatusAsync(providerStep, plan, cancellationToken).ConfigureAwait(false);
         if (!TryReadyCheckpoint(refreshed, out var checkpoint)) return refreshed;
 
         if (!string.Equals(checkpoint.Status!.PrivacyStatus, "private", StringComparison.Ordinal))
@@ -209,7 +229,7 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
     private async Task<StepResult> ExecuteFreshPublishAsync(ProviderStep providerStep, CancellationToken cancellationToken)
     {
         if (!TryPlan(providerStep, out var plan, out var invalid)) return invalid!;
-        var refreshed = await RefreshStatusAsync(providerStep, plan, cancellationToken).ConfigureAwait(false);
+        var refreshed = await RefreshBoundaryStatusAsync(providerStep, plan, cancellationToken).ConfigureAwait(false);
         if (!TryReadyCheckpoint(refreshed, out var checkpoint)) return refreshed;
 
         var currentVisibility = checkpoint.Status!.PrivacyStatus;
@@ -230,7 +250,81 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
         return await _inner.ExecuteStepAsync(publishStep, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<StepResult> RefreshStatusAsync(
+    private async Task<StepResult> RefreshBoundaryStatusAsync(
+        ProviderStep providerStep,
+        YouTubePlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (_auth is null || _client is null)
+            return await RefreshStatusThroughInnerAsync(providerStep, plan, cancellationToken).ConfigureAwait(false);
+
+        TokenMaterial token;
+        try
+        {
+            token = await _auth.GetValidTokenAsync(plan.AccountId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or CryptographicException or InvalidDataException or KeyNotFoundException)
+        {
+            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+                SafeError: "youtube_boundary_auth_unavailable", ObservedState: PublicationState.NeedsAttention,
+                FailureCategory: FailureCategory.Authentication);
+        }
+
+        YouTubeVideoObservation observed;
+        try
+        {
+            observed = await _client.GetVideoAsync(token.AccessToken, plan.Checkpoint.VideoId!, cancellationToken).ConfigureAwait(false);
+        }
+        catch (YouTubeProviderException ex)
+        {
+            return ex.Retryable
+                ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect,
+                    Checkpoint: JsonSerializer.Serialize(plan.Checkpoint), SafeError: ex.SafeCode,
+                    RetryAt: _timeProvider.GetUtcNow().AddMinutes(1), FailureCategory: FailureCategory.Provider)
+                : new(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+                    Checkpoint: JsonSerializer.Serialize(plan.Checkpoint), SafeError: ex.SafeCode,
+                    ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.Provider);
+        }
+
+        if (observed.Status.PublishAt is not null)
+            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
+                Checkpoint: JsonSerializer.Serialize(plan.Checkpoint),
+                SafeError: "youtube_native_schedule_present",
+                ObservedState: PublicationState.NeedsAttention,
+                FailureCategory: FailureCategory.Provider);
+
+        if (!string.Equals(observed.Status.UploadStatus, "processed", StringComparison.Ordinal) ||
+            !string.Equals(observed.ProcessingDetails?.ProcessingStatus, "succeeded", StringComparison.Ordinal))
+        {
+            var processing = plan.Checkpoint with { Stage = "processing" };
+            return new(StepOutcome.Pending, EffectCertainty.NoSideEffect,
+                Checkpoint: JsonSerializer.Serialize(processing), SafeError: "youtube_processing_regressed",
+                RetryAt: _timeProvider.GetUtcNow().AddSeconds(30), FailureCategory: FailureCategory.Provider,
+                ConsumesRetryBudget: false);
+        }
+
+        var snapshot = new YouTubeStatusSnapshot(
+            observed.Status.PrivacyStatus ?? "private",
+            observed.Status.Embeddable,
+            observed.Status.License,
+            observed.Status.PublicStatsViewable,
+            observed.Status.SelfDeclaredMadeForKids,
+            observed.Status.ContainsSyntheticMedia);
+        var ready = plan.Checkpoint with
+        {
+            Stage = "ready",
+            Status = snapshot,
+            StatusCheckedAt = _timeProvider.GetUtcNow(),
+        };
+        return new(StepOutcome.Pending, EffectCertainty.Confirmed,
+            Checkpoint: JsonSerializer.Serialize(ready), RetryAt: _timeProvider.GetUtcNow(), ConsumesRetryBudget: false);
+    }
+
+    private async Task<StepResult> RefreshStatusThroughInnerAsync(
         ProviderStep providerStep,
         YouTubePlan plan,
         CancellationToken cancellationToken)
@@ -298,6 +392,24 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
                 SafeError: "youtube_resume_plan_invalid", ObservedState: PublicationState.NeedsAttention,
                 FailureCategory: FailureCategory.InvalidInput);
             return false;
+        }
+    }
+
+    private static FileStream? TryOpenMediaGuard(MediaAsset asset)
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(asset.StorageRef)) return null;
+        try
+        {
+            return new FileStream(asset.StorageRef, FileMode.Open, FileAccess.Read, FileShare.Read,
+                1, FileOptions.SequentialScan);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 
