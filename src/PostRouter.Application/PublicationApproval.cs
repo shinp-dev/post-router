@@ -12,7 +12,7 @@ public interface IPublicationApprovalStore
 {
     Task<bool> TryEnterPublicationBoundaryAsync(
         PublicationWorkItem item,
-        ProviderStep step,
+        ProviderStep providerStep,
         DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
@@ -38,7 +38,7 @@ internal sealed class PassThroughPublicationApprovalStore : IPublicationApproval
     public static readonly PassThroughPublicationApprovalStore Instance = new();
     private PassThroughPublicationApprovalStore() { }
 
-    public Task<bool> TryEnterPublicationBoundaryAsync(PublicationWorkItem item, ProviderStep step, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+    public Task<bool> TryEnterPublicationBoundaryAsync(PublicationWorkItem item, ProviderStep providerStep, DateTimeOffset now, CancellationToken cancellationToken = default) =>
         Task.FromResult(true);
 
     public Task<PublicationApprovalStatus> GetStatusAsync(Guid publicationId, CancellationToken cancellationToken = default) =>
