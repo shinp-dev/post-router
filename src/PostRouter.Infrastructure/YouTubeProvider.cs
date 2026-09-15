@@ -225,7 +225,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
             if (!response.IsSuccessStatusCode)
             {
                 var failure = await MapFailureAsync(response, "youtube_publish_rejected", cancellationToken).ConfigureAwait(false);
-                var retryAt = failure.SafeCode == "youtube_rate_limited"
+                DateTimeOffset? retryAt = failure.SafeCode == "youtube_rate_limited"
                     ? RetryAt(response) ?? timeProvider.GetUtcNow().AddMinutes(15)
                     : null;
                 return new(false, false, failure.SafeCode, retryAt);
@@ -340,7 +340,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
             throw new YouTubeProviderException("media_integrity_mismatch", false);
     }
 
-    private async Task<YouTubeProviderException> MapFailureAsync(
+    private static async Task<YouTubeProviderException> MapFailureAsync(
         HttpResponseMessage response,
         string fallback,
         CancellationToken cancellationToken)
