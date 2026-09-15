@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "clientRequestId": "example-release-001",
+  "content": {
+    "text": "Phase 1 fake publication"
+  },
+  "targets": [
+    {
+      "account": "fake-main",
+      "provider": "fake",
+      "visibility": "public",
+      "optionsVersion": 1,
+      "options": {}
+    }
+  ]
+}

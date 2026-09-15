@@ -1,0 +1,116 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using PostRouter.Domain;
+using PostRouter.Infrastructure;
+
+namespace PostRouter.Cli;
+
+internal sealed record ManifestDto(int SchemaVersion, string? ClientRequestId, ContentDto? Content, ScheduleDto? Schedule, IReadOnlyList<TargetDto>? Targets);
+internal sealed record ContentDto(string? Text, string? Title, string? Video, IReadOnlyList<string>? Images);
+internal sealed record ScheduleDto(string At, string? TimeZone, int MaxLatenessSeconds = 900);
+internal sealed record TargetDto(string Account, string Provider = "fake", string Visibility = "public", int OptionsVersion = 1, JsonElement? Options = null);
+
+internal static class ManifestReader
+{
+    private static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true };
+
+    public static async Task<CanonicalPostIntent> ReadAsync(string path, SpoolStore spool, TimeProvider timeProvider, CancellationToken cancellationToken)
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE"), "test", StringComparison.Ordinal))
+            throw new NotSupportedException("Phase 1 manifests use the Fake Provider and require POST_ROUTER_PROFILE=test.");
+        var fullPath = Path.GetFullPath(path);
+        if (new FileInfo(fullPath).Length > 1024 * 1024) throw new InvalidDataException("Manifest exceeds the 1 MiB limit.");
+        await using var stream = File.OpenRead(fullPath);
+        var manifest = await JsonSerializer.DeserializeAsync<ManifestDto>(stream, Options, cancellationToken) ?? throw new InvalidDataException("Manifest is empty.");
+        if (manifest.SchemaVersion != 1) throw new InvalidDataException("Unsupported manifest schemaVersion.");
+        if (string.IsNullOrWhiteSpace(manifest.ClientRequestId)) throw new InvalidDataException("Manifest requires clientRequestId.");
+        if (manifest.Content is null) throw new InvalidDataException("Manifest requires content.");
+        if (manifest.Targets is not { Count: > 0 }) throw new InvalidDataException("Manifest requires targets.");
+        foreach (var target in manifest.Targets)
+        {
+            if (string.IsNullOrWhiteSpace(target.Account)) throw new InvalidDataException("Each target requires an account alias.");
+            if (!string.Equals(target.Provider, "fake", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Only the fake provider is available in Phase 1.");
+            if (target.Options is { ValueKind: not JsonValueKind.Object }) throw new InvalidDataException("Target options must be a JSON object.");
+        }
+        var requestedSchedule = manifest.Schedule is null ? null : ParseSchedule(manifest.Schedule);
+
+        var media = new List<MediaAsset>();
+        var baseDirectory = Path.GetDirectoryName(fullPath)!;
+        ContentKind kind;
+        if (manifest.Content.Video is not null)
+        {
+            if (manifest.Content.Images is { Count: > 0 }) throw new InvalidDataException("Video and images cannot be mixed in Phase 1.");
+            var asset = await spool.ImportAsync(Resolve(baseDirectory, manifest.Content.Video), cancellationToken);
+            if (asset.DetectedMime != "video/mp4") throw new InvalidDataException("content.video must be an MP4 file.");
+            media.Add(asset);
+            kind = ContentKind.Video;
+        }
+        else if (manifest.Content.Images is { Count: > 0 })
+        {
+            foreach (var image in manifest.Content.Images)
+            {
+                var asset = await spool.ImportAsync(Resolve(baseDirectory, image), cancellationToken);
+                if (asset.DetectedMime != "image/jpeg") throw new InvalidDataException("content.images must contain JPEG files in Phase 1.");
+                media.Add(asset);
+            }
+            kind = ContentKind.ImageSet;
+        }
+        else kind = ContentKind.TextOnly;
+
+        var schedule = requestedSchedule ?? new ScheduleIntent(ScheduleMode.Immediate, timeProvider.GetUtcNow(), TimeSpan.FromMinutes(15));
+        var targets = manifest.Targets.Select(target => new TargetIntent(
+            StableAccountId(target.Provider, target.Account), target.Provider.ToLowerInvariant(), target.Visibility, $"{target.Provider.ToLowerInvariant()}-options/v1", target.OptionsVersion,
+            Canonicalize(target.Options), target.Account)).ToArray();
+        return new(manifest.ClientRequestId, new Content(Guid.NewGuid(), kind, manifest.Content.Text, manifest.Content.Title, media), targets, schedule);
+    }
+
+    private static ScheduleIntent ParseSchedule(ScheduleDto schedule)
+    {
+        if (!DateTimeOffset.TryParse(schedule.At, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var due))
+            throw new InvalidDataException("schedule.at must be an offset-bearing ISO 8601 value.");
+        if (!schedule.At.EndsWith('Z') && schedule.At.LastIndexOf('+') < 10 && schedule.At.LastIndexOf('-') < 10)
+            throw new InvalidDataException("schedule.at must include an offset.");
+        if (schedule.MaxLatenessSeconds < 0) throw new InvalidDataException("maxLatenessSeconds must not be negative.");
+        if (!string.IsNullOrWhiteSpace(schedule.TimeZone))
+        {
+            TimeZoneInfo zone;
+            try { zone = TimeZoneInfo.FindSystemTimeZoneById(schedule.TimeZone); }
+            catch (TimeZoneNotFoundException) { throw new InvalidDataException("schedule.timeZone is unknown on this system."); }
+            catch (InvalidTimeZoneException) { throw new InvalidDataException("schedule.timeZone is invalid on this system."); }
+            if (zone.GetUtcOffset(due.UtcDateTime) != due.Offset) throw new InvalidDataException("schedule.at offset does not match schedule.timeZone at that instant.");
+        }
+        return new(ScheduleMode.AtTime, due.ToUniversalTime(), TimeSpan.FromSeconds(schedule.MaxLatenessSeconds), schedule.At, schedule.TimeZone, due.Offset);
+    }
+
+    private static string Resolve(string root, string path) => Path.IsPathRooted(path) ? path : Path.Combine(root, path);
+    private static Guid StableAccountId(string provider, string alias)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"post-router/account/{provider.ToLowerInvariant()}/{alias}"));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    private static string Canonicalize(JsonElement? value)
+    {
+        using var output = new MemoryStream();
+        using var empty = value is null ? JsonDocument.Parse("{}") : null;
+        using (var writer = new Utf8JsonWriter(output)) WriteElement(writer, value ?? empty!.RootElement);
+        return Encoding.UTF8.GetString(output.ToArray());
+    }
+
+    private static void WriteElement(Utf8JsonWriter writer, JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (var property in value.EnumerateObject().OrderBy(x => x.Name, StringComparer.Ordinal)) { writer.WritePropertyName(property.Name); WriteElement(writer, property.Value); }
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray(); foreach (var item in value.EnumerateArray()) WriteElement(writer, item); writer.WriteEndArray();
+                break;
+            default: value.WriteTo(writer); break;
+        }
+    }
+}

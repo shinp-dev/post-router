@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://post-router.local/contracts/post-manifest-v1.schema.json",
+  "title": "Post Router Phase 1 manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "clientRequestId", "content", "targets"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "clientRequestId": { "type": "string", "minLength": 1 },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "title": { "type": "string" },
+        "video": { "type": "string", "minLength": 1 },
+        "images": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        { "not": { "required": ["video", "images"] } },
+        { "anyOf": [{ "required": ["text"] }, { "required": ["video"] }, { "required": ["images"] }] }
+      ]
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at"],
+      "properties": {
+        "at": { "type": "string", "format": "date-time" },
+        "timeZone": { "type": "string", "minLength": 1 },
+        "maxLatenessSeconds": { "type": "integer", "minimum": 0, "default": 900 }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["account"],
+        "properties": {
+          "account": { "type": "string", "minLength": 1 },
+          "provider": { "const": "fake", "default": "fake" },
+          "visibility": { "type": "string", "default": "public" },
+          "optionsVersion": { "const": 1 },
+          "options": { "type": "object" }
+        }
+      }
+    }
+  }
+}

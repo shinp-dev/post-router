@@ -78,7 +78,7 @@ Raw metricsを保存してからversion付きNormalizerがprojectionを作る。
 | docs | 本設計書 |
 | contracts | CLI入出力schema、投稿manifest、provider options schema |
 
-これは予定配置であり、本PRではsrcや実装schemaを生成しない。SDK由来型は各Providerプロジェクトの内部可視性に閉じる。
+Phase 1ではDomain / Application / Infrastructure / CLIとFake Providerをこの配置で実装した。実SNS Providerプロジェクトは各該当Phaseで追加し、SDK由来型を各Providerプロジェクトの内部可視性に閉じる。
 
 ## 変更の波及
 

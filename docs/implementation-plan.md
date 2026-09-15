@@ -1,6 +1,6 @@
 # Implementation plan
 
-2026-09-14時点。今回の成果物は設計書だけ。以下は将来の実装計画であり、credential発行・SNS投稿を実行する承認や完了記録ではない。
+2026-09-15更新。Phase 0は設計成果、Phase 1はCore + SQLite + Fake Providerの実装成果。Phase 2以降は将来計画であり、credential発行・SNS投稿を実行する承認や完了記録ではない。
 
 ## Phase 0 — 設計と成立性
 
@@ -14,15 +14,15 @@ Phase 1を一括実装しない。各sliceはmainへ入れられる縦の動作�
 
 | Slice | 実装範囲 | 完了条件 |
 | --- | --- | --- |
-| 1A Foundation | .NET 10 solution、Domain最小型、CLI JSON envelope、embedded migration runner、TimeProvider | build/test、schema version拒否、canonical intent golden test |
-| 1B Durable publish | manifest、素材固定、Post/Target/Publication/Job/Attempt、Fake Provider、DispatchPrepared→receipt→checkpoint | enqueue応答喪失、同一key競合、公開応答喪失、Unknown、部分成功 |
-| 1C Worker recovery | OS lock、WorkerRun、bounded dispatcher、priority、claim recovery、start/stop、Windows user task | 二重worker、長いupload中のdue publish、graceful/forced stop、再起動、72時間制限定義 |
-| 1D Secrets and auth | MasterKeyStore、AES-GCM vault、Fake AuthGrant/rotation | secret marker非流出、grant refresh race、rotation response喪失 |
-| 1E Metrics and operations | Raw/projection、StatsSyncRun、retention、backup/restore quarantine、doctor/queue/status | metric意味差、期限超過、old backup、restore release拒否 |
+| 1A Foundation | **実装済み**: .NET 10 solution、Domain最小型、CLI JSON envelope、embedded migration runner、TimeProvider | build/test、schema version拒否、canonical intent golden test |
+| 1B Durable publish | **実装済み**: manifest、素材固定、Post/Target/Publication/Job/Attempt、Fake Provider、DispatchPrepared→receipt→checkpoint | 同一key競合、公開応答喪失、Unknown、部分成功、content/options再ロード |
+| 1C Worker recovery | **実装済み**: OS lock、WorkerRun、bounded dispatcher、priority、claim recovery、start/stop、Windows user task XML/readback | 二重worker、長時間処理中の新規due取得、graceful stop、再起動回復、`PT0S`定義 |
+| 1D Secrets and auth | **実装済み**: Credential Manager MasterKeyStore、AES-GCM vault、Fake AuthGrant/rotation | secret marker非流出、grant refresh race、purpose binding |
+| 1E Metrics and operations | **実装済み**: Raw/projection、retention、backup/restore quarantine、doctor/queue/status | metric意味差、期限超過、spool付きold backup、restore release拒否 |
 
 1Aでは全provider用の空テーブルや空interfaceを先に量産しない。1BでPublication owner、1DでAuthGrant owner、1EでStats/DataDeletion ownerをmigration追加し、Jobの閉じたowner-kind契約を各sliceで拡張する。最初の実Provider前に抽象化を固定しすぎず、X Phaseで得た差分はprovider境界の範囲で契約へ反映する。
 
-Phase 1全体の完了条件: enqueue応答喪失・公開応答喪失・二重worker・長時間upload競合・refresh race・PC再起動・old backupの必須試験を通す。fakeを公開済みとみなす本番profileは存在しない。SNS API keyやdeveloper accountは不要。
+Phase 1全体の自動試験は `tests/PostRouter.Tests` に置く。enqueue冪等再試行・公開応答喪失・二重worker・長時間処理競合・refresh race・claim再起動回復・old backup quarantineを検証する。Fakeを公開済みとみなす本番profileは存在しない。SNS API keyやdeveloper accountは不要。Windows Task Schedulerへの実登録、ログオン後再起動、Credential Managerの実機確認はWindows受入試験として別途行う。
 
 人間が用意するもの:
 - Windows 11等の.NET 10対応PCと通常ユーザーprofile。task/vaultの確認に使えるログオン環境。
