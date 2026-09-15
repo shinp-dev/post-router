@@ -216,7 +216,7 @@ public static class GuiApplication
         headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
         headers.XContentTypeOptions = "nosniff";
         headers.XFrameOptions = "DENY";
-        headers.ReferrerPolicy = "no-referrer";
+        headers["Referrer-Policy"] = "no-referrer";
         headers.CacheControl = "no-store";
     }
 
