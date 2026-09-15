@@ -319,7 +319,7 @@ public sealed class YouTubeFailureMatrixTests
         var auth = new AuthCoordinator(context.Store, context.Store,
             new FileAuthGrantLockFactory(Path.Combine(context.Directory, "youtube-matrix-auth-locks")), context.Gate, [authProvider], context.Time);
         var account = await SaveConnectionAsync(context);
-        IProviderAdapter adapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(auth, client, context.Time));
+        IProviderAdapter adapter = new YouTubeResumeSafeAdapter(new YouTubeProviderAdapter(auth, client, context.Time), context.Time);
         var registry = new ProviderRegistry([adapter]);
         var applicationStore = new ApprovalAwarePostRouterStore(context.Store, context.Approvals, context.Time, context.Database);
         var posts = new PostService(applicationStore, context.Gate, registry, context.Time);
@@ -343,7 +343,8 @@ public sealed class YouTubeFailureMatrixTests
     {
         var asset = new MediaAsset(Guid.NewGuid(), Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.LongLength, "video/mp4", path);
         return new(key, new Content(Guid.NewGuid(), ContentKind.Video, "description", "Video title", [asset]),
-            [new TargetIntent(accountId, "youtube", "public", "youtube-options/v1", 1, "{}", "youtube-matrix")],
+            [new TargetIntent(accountId, "youtube", "public", "youtube-options/v1", 1,
+                "{\"madeForKids\":false,\"uploadNoticeAcknowledged\":true}", "youtube-matrix")],
             new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(30)));
     }
 
