@@ -240,8 +240,9 @@ WHERE j.publication_id=$id AND a.effect_certainty IN ('NotSent','NoSideEffect')
             "SELECT COUNT(*) FROM jobs WHERE publication_id=$id AND state IN ('Queued','Claimed','Blocked')", cancellationToken, ("$id", Id(publicationId))) != 0;
         if (!safeAttempt || remoteExists || activeExists) { transaction.Commit(); return false; }
         PublicationStateMachine.EnsureCanTransition(state, PublicationState.Pending);
+        PublicationStateMachine.EnsureCanTransition(PublicationState.Pending, PublicationState.Ready);
         await SqliteDatabase.ExecuteAsync(connection, transaction,
-            "UPDATE publications SET state='Pending',safe_error=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
+            "UPDATE publications SET state='Ready',safe_error=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
         await SqliteDatabase.ExecuteAsync(connection, transaction,
             "INSERT INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($job,'Publish',$publication,100,'manual-retry','Queued',$due)", cancellationToken,
             ("$job", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));

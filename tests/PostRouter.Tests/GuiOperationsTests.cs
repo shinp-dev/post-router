@@ -40,7 +40,7 @@ public sealed class GuiOperationsTests
 
         Assert.True((await context.Operations.PublicationAsync(publicationId))!.CanRetry);
         await context.Operations.RetryAsync(publicationId);
-        Assert.Equal(PublicationState.Pending, (await context.Operations.PublicationAsync(publicationId))!.Summary.PublicationState);
+        Assert.Equal(PublicationState.Ready, (await context.Operations.PublicationAsync(publicationId))!.Summary.PublicationState);
         _ = await context.Worker.RunOnceAsync();
         Assert.Equal(PublicationState.Published, (await context.Operations.PublicationAsync(publicationId))!.Summary.PublicationState);
         Assert.Equal(2, context.Provider.PublishCalls);

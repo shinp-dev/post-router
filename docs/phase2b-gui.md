@@ -56,7 +56,7 @@ pub gui --port 43127 --no-open
 - safe manual retry
 - Reconcileの即時queue要求
 
-retryは`Failed -> Pending`がDomain上許可され、直近Attemptが`NotSent`/`NoSideEffect`、remote objectなし、active jobなしの場合だけ同一transactionで作成する。Unknownからretryする経路はない。
+retryはDomain上の`Failed -> Pending -> Ready`を順に検証し、直近Attemptが`NotSent`/`NoSideEffect`、remote objectなし、active jobなしの場合だけ同一transactionで再開する。Unknownからretryする経路はない。
 
 ## 検証境界
 
