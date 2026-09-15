@@ -12,7 +12,7 @@
 
 ## Phase 2C-1
 
-JPEG 1〜4枚を対象とする。各upload完了時にmedia ID一覧を暗号化checkpointへ保存し、次のworker実行で未upload画像だけを送る。全media ID取得後だけPost作成へ進む。media upload後の通信断は孤児mediaを生む可能性があるがPostは公開されないため再upload可能とする。Post作成送信後の不明状態は従来どおりUnknownとし、自動再POSTしない。
+JPEG 1〜4枚を対象とする。各upload完了時にmedia ID一覧を暗号化checkpointへ保存し、次のworker実行で未upload画像だけを送る。全media ID取得後だけPost作成へ進む。media upload後の通信断やcrashは孤児mediaを生む可能性があるがPostは公開されないため、`SafeRepeatNoPublication`として再upload可能とする。Post作成送信後の不明状態は従来どおりUnknownとし、自動再POSTしない。
 
 ## 動画を同時実装しない理由
 

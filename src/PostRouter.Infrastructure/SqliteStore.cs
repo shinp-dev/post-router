@@ -356,7 +356,7 @@ WHERE j.state='Claimed' AND (j.worker_run_id IS NULL OR j.worker_run_id<>$run) A
         }
         foreach (var item in jobs)
         {
-            if (item.Attempt is null || item.Replay == ReplaySafety.SafeRead || item.Replay == ReplaySafety.ResumeKnownHandle)
+            if (item.Attempt is null || item.Replay is ReplaySafety.SafeRead or ReplaySafety.SafeRepeatNoPublication or ReplaySafety.ResumeKnownHandle)
             {
                 await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Queued',worker_run_id=NULL,claimed_at=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job)));
                 continue;

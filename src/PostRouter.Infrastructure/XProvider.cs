@@ -68,15 +68,20 @@ internal sealed class XApiClient(HttpClient httpClient, TimeProvider timeProvide
         catch (JsonException ex) { throw new XProviderException("x_identity_malformed", false, ex); }
     }
 
-    public async Task<string> UploadImageAsync(string accessToken, string path, CancellationToken cancellationToken)
+    public async Task<string> UploadImageAsync(string accessToken, XUploadAsset asset, CancellationToken cancellationToken)
     {
         using var request = Authorized(HttpMethod.Post, Endpoint("2/media/upload"), accessToken);
         using var form = new MultipartFormDataContent();
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
+        await using var stream = new FileStream(asset.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length != asset.SizeBytes) throw new XProviderException("media_integrity_mismatch", false);
+        var actualHash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+        if (!string.Equals(actualHash, asset.Sha256, StringComparison.Ordinal))
+            throw new XProviderException("media_integrity_mismatch", false);
+        stream.Position = 0;
         using var media = new StreamContent(stream);
         media.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
-        form.Add(media, "media", Path.GetFileName(path));
+        form.Add(media, "media", "image.jpg");
         form.Add(new StringContent("tweet_image"), "media_category");
         request.Content = form;
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -226,6 +231,7 @@ internal sealed record XUser(
     [property: JsonPropertyName("username")] string? Username);
 
 internal sealed record XCreatePostResult(bool Success, string? PostId, string? SafeError, DateTimeOffset? RetryAt, bool Ambiguous);
+internal sealed record XUploadAsset(string Path, string Sha256, long SizeBytes);
 
 internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider) : IInteractiveAuthProvider
 {
@@ -334,12 +340,14 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
         var mediaState = ParseCheckpoint(checkpoint);
         var remaining = input.Content.MediaAssets.Skip(mediaState.MediaIds.Count).FirstOrDefault();
         var plan = remaining is not null
-            ? JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "upload-image", remaining.StorageRef, mediaState.MediaIds))
+            ? JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "upload-image",
+                new XUploadAsset(remaining.StorageRef, remaining.Sha256, remaining.SizeBytes), mediaState.MediaIds))
             : JsonSerializer.Serialize(new XPublishPlan(input.Publication.AccountId, input.Content.Text!, "create-post", null, mediaState.MediaIds));
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(plan)));
         var uploading = remaining is not null;
         return Task.FromResult(new ProviderStep(uploading ? $"x.upload-image.{mediaState.MediaIds.Count}.v1" : "x.create-post.v2",
-            uploading ? StepEffect.UploadOnly : StepEffect.MayPublish, ReplaySafety.NotReplayable, digest,
+            uploading ? StepEffect.UploadOnly : StepEffect.MayPublish,
+            uploading ? ReplaySafety.SafeRepeatNoPublication : ReplaySafety.NotReplayable, digest,
             timeProvider.GetUtcNow(), OpaquePlan: plan));
     }
 
@@ -368,11 +376,11 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
 
         if (plan.Operation == "upload-image")
         {
-            if (string.IsNullOrWhiteSpace(plan.MediaPath) || !File.Exists(plan.MediaPath))
+            if (plan.Media is null || !File.Exists(plan.Media.Path))
                 return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "media_unavailable", FailureCategory: FailureCategory.InvalidInput);
             try
             {
-                var mediaId = await client.UploadImageAsync(token.AccessToken, plan.MediaPath, cancellationToken).ConfigureAwait(false);
+                var mediaId = await client.UploadImageAsync(token.AccessToken, plan.Media, cancellationToken).ConfigureAwait(false);
                 var next = new XMediaCheckpoint([.. plan.MediaIds, mediaId]);
                 return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: JsonSerializer.Serialize(next), RetryAt: timeProvider.GetUtcNow());
             }
@@ -403,7 +411,7 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
         "x_network_unavailable" or "x_publish_response_lost" => FailureCategory.Network,
         "x_auth_or_scope_rejected" or "x_token_rejected" or "x_reconnect_required" or
             "auth_required" or "credential_unavailable" => FailureCategory.Authentication,
-        "x_plan_invalid" => FailureCategory.InvalidInput,
+        "x_plan_invalid" or "media_integrity_mismatch" or "media_unavailable" => FailureCategory.InvalidInput,
         "x_publish_ambiguous_server_error" or "x_publish_malformed_success" or
             "x_reconcile_inconclusive" => FailureCategory.Unknown,
         _ => FailureCategory.Provider,
@@ -416,6 +424,6 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
         catch (JsonException) { throw new InvalidDataException("X media checkpoint is malformed."); }
     }
 
-    private sealed record XPublishPlan(Guid AccountId, string Text, string Operation, string? MediaPath, IReadOnlyList<string> MediaIds);
+    private sealed record XPublishPlan(Guid AccountId, string Text, string Operation, XUploadAsset? Media, IReadOnlyList<string> MediaIds);
     private sealed record XMediaCheckpoint(IReadOnlyList<string> MediaIds);
 }

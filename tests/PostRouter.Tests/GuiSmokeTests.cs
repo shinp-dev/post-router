@@ -91,6 +91,29 @@ public sealed class GuiSmokeTests
     }
 
     [Fact]
+    public async Task Gui_enqueues_jpeg_images_and_rejects_unexpected_media_without_path_disclosure()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        using var accepted = await setup.PostImagesAsync([("photo.jpg", "image/jpeg", new byte[] { 0xff, 0xd8, 0xff, 0x01 })], "image caption");
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedBody = await accepted.Content.ReadAsStringAsync();
+        using var acceptedJson = JsonDocument.Parse(acceptedBody);
+        var postId = acceptedJson.RootElement.GetProperty("postId").GetGuid();
+        Assert.DoesNotContain(setup.Directory, acceptedBody, StringComparison.OrdinalIgnoreCase);
+
+        using var publications = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/publications"));
+        Assert.Contains(publications.RootElement.EnumerateArray(), item => item.GetProperty("postId").GetGuid() == postId);
+
+        using var rejected = await setup.PostImagesAsync([("fake.jpg", "image/jpeg", Encoding.ASCII.GetBytes("not-a-jpeg"))], "bad image");
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        var rejectedBody = await rejected.Content.ReadAsStringAsync();
+        Assert.Contains("invalid_input", rejectedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(setup.Directory, rejectedBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(System.IO.Directory.EnumerateFiles(Path.Combine(setup.Directory, "incoming")));
+    }
+
+    [Fact]
     public async Task Account_api_never_returns_tokens_and_disconnect_preserves_queue()
     {
         await using var setup = await GuiTestSetup.CreateAsync();
@@ -185,6 +208,25 @@ public sealed class GuiSmokeTests
             {
                 Content = JsonContent.Create(value),
             };
+            request.Headers.Add("Origin", Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+            request.Headers.Add("X-Post-Router-CSRF", CsrfToken);
+            return await Client.SendAsync(request);
+        }
+
+        public async Task<HttpResponseMessage> PostImagesAsync(
+            IReadOnlyList<(string Name, string ContentType, byte[] Bytes)> images, string text)
+        {
+            using var content = new MultipartFormDataContent();
+            content.Add(new StringContent(FakeAccountId.ToString("D")), "accountId");
+            content.Add(new StringContent(text), "text");
+            content.Add(new StringContent($"gui-image-{Guid.NewGuid():N}"), "clientRequestId");
+            foreach (var image in images)
+            {
+                var bytes = new ByteArrayContent(image.Bytes);
+                bytes.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(image.ContentType);
+                content.Add(bytes, "images", image.Name);
+            }
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/posts/images") { Content = content };
             request.Headers.Add("Origin", Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
             request.Headers.Add("X-Post-Router-CSRF", CsrfToken);
             return await Client.SendAsync(request);
