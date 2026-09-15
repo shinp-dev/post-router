@@ -66,7 +66,7 @@ public sealed record StepResult(
     StepOutcome Outcome, EffectCertainty EffectCertainty, string? RemoteObjectId = null,
     string? Checkpoint = null, string? SafeError = null, DateTimeOffset? RetryAt = null,
     PublicationState? ObservedState = null, FailureCategory? FailureCategory = null,
-    bool ConsumesRetryBudget = true);
+    JobKind? NextJobKind = null);
 
 public sealed record EnqueueResult(Guid PostId, bool Existing, IReadOnlyList<Guid> PublicationIds);
 
