@@ -17,7 +17,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         _httpClient = httpClient;
         var database = new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db"));
         Approvals = new PublicationApprovalStore(database);
-        var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System);
+        var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System, database);
         var accountLocks = new FileAccountOperationLockFactory(Path.Combine(dataDirectory, "locks"));
         var grantLocks = new FileAuthGrantLockFactory(Path.Combine(dataDirectory, "locks"));
         var xClient = new XApiClient(httpClient, TimeProvider.System);
