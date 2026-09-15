@@ -17,6 +17,8 @@ flowchart TD
 
 矢印はコンパイル時の依存。実行時にはApplicationが注入されたportを呼ぶ。composition rootのみ具象AdapterとInfrastructureを参照する。DomainはSNS SDK、JSONレスポンス、HTTP status、SQLite、OS APIを参照しない。
 
+Phase 2Bでは`PostRouter.Gui`をCLIと並列のPresentation Layerとして追加する。GUIのHTTP endpointは`OperationsService`、`PostService`、`AccountConnectionService`だけを呼び、InfrastructureのDB/API実装へ直接依存しない。`RuntimeFactory`はcomposition rootとしてのみ利用する。方式とlocal Web threat modelは[Phase 2B GUI](phase2b-gui.md)を参照。
+
 同一process内のモジュール構成とし、ネットワークRPC、message broker、microservices、動的プラグインローダーを導入しない。CLIとworkerは同じapplication use caseを利用するが、**投稿HTTPを実行できるのはworkerの排他ロックを保持した実行経路だけ**。
 
 ## レイヤ

@@ -26,4 +26,15 @@ public static class PublicationStateMachine
         if (!CanTransition(from, to))
             throw new InvalidOperationException($"Publication transition {from} -> {to} is not allowed.");
     }
+
+    public static bool CanCancel(PublicationState state) => state is
+        PublicationState.Pending or PublicationState.Preparing or PublicationState.Ready or
+        PublicationState.Publishing or PublicationState.Processing or PublicationState.ScheduledRemote or
+        PublicationState.AwaitingUser or PublicationState.NeedsAttention;
+
+    public static bool CanRetry(PublicationState state) => state == PublicationState.Failed ||
+        state == PublicationState.NeedsAttention && CanTransition(state, PublicationState.Failed);
+
+    public static bool CanReconcile(PublicationState state) =>
+        state is PublicationState.Unknown or PublicationState.Processing or PublicationState.CancelRequested;
 }

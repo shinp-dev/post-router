@@ -195,10 +195,11 @@ public sealed class XProviderTests
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.Unauthorized, StepOutcome.Rejected, "x_auth_or_scope_rejected")]
-    [InlineData(HttpStatusCode.BadRequest, StepOutcome.Rejected, "x_post_rejected")]
-    [InlineData(HttpStatusCode.InternalServerError, StepOutcome.Ambiguous, "x_publish_ambiguous_server_error")]
-    public async Task Provider_errors_are_mapped_without_exposing_response_bodies(HttpStatusCode status, StepOutcome outcome, string safeError)
+    [InlineData(HttpStatusCode.Unauthorized, StepOutcome.Rejected, "x_auth_or_scope_rejected", FailureCategory.Authentication)]
+    [InlineData(HttpStatusCode.BadRequest, StepOutcome.Rejected, "x_post_rejected", FailureCategory.Provider)]
+    [InlineData(HttpStatusCode.InternalServerError, StepOutcome.Ambiguous, "x_publish_ambiguous_server_error", FailureCategory.Unknown)]
+    public async Task Provider_errors_are_mapped_without_exposing_response_bodies(
+        HttpStatusCode status, StepOutcome outcome, string safeError, FailureCategory failureCategory)
     {
         await using var context = await TestContext.CreateAsync();
         using var http = Client((_, _, _) => Task.FromResult(Json(status, "{\"detail\":\"secret-provider-message\"}")));
@@ -209,6 +210,7 @@ public sealed class XProviderTests
 
         Assert.Equal(outcome, result.Outcome);
         Assert.Equal(safeError, result.SafeError);
+        Assert.Equal(failureCategory, result.FailureCategory);
         Assert.DoesNotContain("secret-provider-message", result.SafeError);
         await setup.Worker.DisposeAsync();
     }
@@ -228,6 +230,7 @@ public sealed class XProviderTests
         var result = await setup.Adapter.ExecuteStepAsync(step, default);
         Assert.Equal(StepOutcome.Pending, result.Outcome);
         Assert.Equal(EffectCertainty.NoSideEffect, result.EffectCertainty);
+        Assert.Equal(FailureCategory.RateLimit, result.FailureCategory);
         Assert.Equal(context.Time.GetUtcNow().AddMinutes(3), result.RetryAt);
         await setup.Worker.DisposeAsync();
     }

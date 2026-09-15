@@ -2,6 +2,8 @@
 
 2026-09-15更新。Phase 0は設計成果、Phase 1はCore + SQLite + Fake Providerの実装成果。Phase 2以降は将来計画であり、credential発行・SNS投稿を実行する承認や完了記録ではない。
 
+Phase 2BではPhase 2A X branch上のstacked phaseとして、ASP.NET Core localhost host、provider-neutral operations query/command、Dashboard、投稿、一覧/詳細、Account/OAuth操作を追加する。media、2つ目のProvider、高度analytics、worker統合、remote accessは含めない。
+
 ## Phase 0 — 設計と成立性
 
 本PR: README、公式調査、ADR、CLI、Domain、Provider契約、scheduler、security、persistence、analytics、testing、設計監査。X/YouTube/Instagramは条件付きの実用MVP、TikTok Direct Postは本用途でpolicy-blockedとする。

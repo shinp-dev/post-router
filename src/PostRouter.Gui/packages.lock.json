@@ -2,12 +2,6 @@
   "version": 1,
   "dependencies": {
     "net10.0": {
-      "System.CommandLine": {
-        "type": "Direct",
-        "requested": "[2.0.4, )",
-        "resolved": "2.0.4",
-        "contentHash": "L5qskg+CB8T40PhVUGFDI9M9GiRhLf9jjQq7UCB1EGGb07oT9/SyS2Q7PCZh7l8yyd41yEnlI6T2ZrkGBxRPkg=="
-      },
       "Microsoft.Data.Sqlite": {
         "type": "Transitive",
         "resolved": "10.0.12",
@@ -61,13 +55,6 @@
       },
       "postrouter.domain": {
         "type": "Project"
-      },
-      "postrouter.gui": {
-        "type": "Project",
-        "dependencies": {
-          "PostRouter.Application": "[1.0.0, )",
-          "PostRouter.Infrastructure": "[1.0.0, )"
-        }
       },
       "postrouter.infrastructure": {
         "type": "Project",

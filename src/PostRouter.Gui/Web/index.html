@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>post-router</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div><strong>post-router</strong><span>Local operations</span></div>
+    <nav aria-label="メインナビゲーション">
+      <button class="nav active" data-view="dashboard">概要</button>
+      <button class="nav" data-view="compose">投稿作成</button>
+      <button class="nav" data-view="publications">投稿一覧</button>
+      <button class="nav" data-view="accounts">アカウント</button>
+    </nav>
+  </header>
+  <main>
+    <div id="notice" role="status" aria-live="polite"></div>
+
+    <section id="dashboard" class="view active">
+      <div class="heading"><div><p class="eyebrow">Dashboard</p><h1>配信状況</h1></div><button class="secondary refresh">更新</button></div>
+      <div id="alerts"></div>
+      <div id="summary" class="summary" aria-label="投稿状態の集計"></div>
+      <div class="panel"><h2>接続済みアカウント</h2><div id="dashboard-accounts"></div></div>
+    </section>
+
+    <section id="compose" class="view">
+      <div class="heading"><div><p class="eyebrow">New publication</p><h1>投稿作成</h1></div></div>
+      <form id="post-form" class="panel form-grid">
+        <label>アカウント<select id="post-account" required></select></label>
+        <label class="wide">本文<textarea id="post-text" rows="7" maxlength="280" required placeholder="投稿本文"></textarea><span id="text-count" class="hint">0 / 280</span></label>
+        <label class="choice"><input id="schedule-enabled" type="checkbox"> 日時を指定する</label>
+        <label id="schedule-field" hidden>投稿日時<input id="post-at" type="datetime-local"></label>
+        <div class="wide actions"><button type="submit">Queueへ登録</button></div>
+      </form>
+      <p class="hint">現在はProvider capabilityに基づくtext-only投稿を受け付けます。送信は既存workerが担当します。</p>
+    </section>
+
+    <section id="publications" class="view">
+      <div class="heading"><div><p class="eyebrow">Publications</p><h1>投稿一覧</h1></div><button class="secondary refresh">更新</button></div>
+      <div class="panel table-wrap"><table><thead><tr><th>Provider / Account</th><th>本文</th><th>予定</th><th>Publication</th><th>Queue</th><th>Remote ID</th></tr></thead><tbody id="publication-rows"></tbody></table></div>
+    </section>
+
+    <section id="accounts" class="view">
+      <div class="heading"><div><p class="eyebrow">Accounts</p><h1>アカウント</h1></div><button class="secondary refresh">更新</button></div>
+      <form id="connect-form" class="panel form-grid compact">
+        <h2 class="wide">Providerへ接続</h2>
+        <label>Provider<select id="connect-provider"></select></label>
+        <label>Client ID<input id="client-id" autocomplete="off" required></label>
+        <label>表示用alias<input id="account-alias" autocomplete="off"></label>
+        <div class="actions"><button type="submit">認証を開始</button></div>
+        <p class="wide hint">認証画面は別タブで開きます。tokenやclient secretはブラウザへ保存しません。</p>
+      </form>
+      <div id="account-list" class="cards"></div>
+    </section>
+
+    <dialog id="detail-dialog">
+      <div class="dialog-head"><h2>投稿詳細</h2><button id="detail-close" class="icon" aria-label="閉じる">×</button></div>
+      <div id="detail-content"></div>
+      <div id="detail-actions" class="actions"></div>
+    </dialog>
+
+    <dialog id="confirm-dialog">
+      <h2 id="confirm-title">確認</h2><p id="confirm-message"></p>
+      <div class="actions"><button id="confirm-cancel" class="secondary">戻る</button><button id="confirm-ok" class="danger">実行</button></div>
+    </dialog>
+  </main>
+</body>
+</html>

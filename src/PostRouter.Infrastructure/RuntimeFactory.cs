@@ -26,6 +26,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
             : [new XProviderAdapter(Auth, xClient, TimeProvider.System)];
         var providers = new ProviderRegistry(adapters);
         Posts = new(store, maintenanceGate, providers, TimeProvider.System);
+        Operations = new(store, maintenanceGate, providers, Posts, TimeProvider.System);
         Worker = new(store, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System, accountOperationLocks: accountLocks);
         Stats = new(store, maintenanceGate, providers, TimeProvider.System);
         var spoolDirectory = Path.Combine(dataDirectory, "spool");
@@ -39,6 +40,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     public AuthCoordinator Auth { get; }
     public AccountConnectionService Accounts { get; }
     public PostService Posts { get; }
+    public OperationsService Operations { get; }
     public WorkerService Worker { get; }
     public StatsService Stats { get; }
     public MaintenanceService Maintenance { get; }

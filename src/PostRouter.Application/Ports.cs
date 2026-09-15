@@ -22,7 +22,8 @@ public sealed record TokenMaterial(string AccessToken, string? RefreshToken, Dat
 public sealed record RefreshResult(TokenMaterial Material, string ProviderRequestId);
 public sealed record AccountConnection(
     Guid AccountId, string Provider, string Alias, string Status, string RemoteSubject,
-    string DisplayName, string ClientId, string Scope, DateTimeOffset? TokenExpiresAt);
+    string DisplayName, string ClientId, string Scope, DateTimeOffset? TokenExpiresAt,
+    string? LastAuthError = null);
 public sealed record AccountConnectionWrite(
     string Provider, string Alias, string RemoteSubject, string DisplayName, string ClientId,
     string Scope, DateTimeOffset ExpiresAt, string VaultBlobId);
@@ -32,6 +33,27 @@ public sealed record AuthorizationSession(
     string? Alias = null);
 public sealed record ConnectedIdentity(string RemoteSubject, string DisplayName, string Scope, TokenMaterial Material);
 public sealed record AccountRevokeResult(Guid AccountId, bool RemoteRevoked, bool LocalDisconnected, string? SafeError);
+public sealed record ProviderCapabilities(
+    string ProviderKey, IReadOnlyList<ContentKind> ContentKinds, IReadOnlyList<string> Visibilities,
+    string OptionsSchema, int OptionsVersion, string DefaultOptionsJson,
+    bool InteractiveAuthentication, bool Revoke);
+public sealed record DashboardSummary(
+    int Scheduled, int Pending, int Processing, int Published, int Failed, int NeedsAttention,
+    int Unknown, int Cancelled, int Expired, int AuthenticationErrors);
+public sealed record PublicationListItem(
+    Guid PostId, Guid PublicationId, string Provider, Guid AccountId, string AccountAlias,
+    string ContentPreview, PublicationState PublicationState, ScheduleMode ScheduleMode,
+    DateTimeOffset DueAt, DateTimeOffset CreatedAt, DateTimeOffset? PublishedAt,
+    string? RemoteId, JobKind? JobKind, JobState? JobState, DateTimeOffset? JobDueAt,
+    int AttemptCount, string? SafeError);
+public sealed record PublicationDetail(
+    PublicationListItem Summary, string? Text, string Visibility, string OptionsSchema,
+    DateTimeOffset? FirstSubmittedAt, DateTimeOffset? ConfirmedAt,
+    string? ProviderError, FailureCategory? NormalizedError, bool ReconcileQueued,
+    bool CanCancel, bool CanRetry, bool CanReconcile);
+public sealed record CreateTextPostRequest(
+    Guid AccountId, string Text, DateTimeOffset? PublishAt = null,
+    string? ClientRequestId = null);
 public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
 {
     public string SafeCode { get; } = safeCode;
@@ -48,6 +70,12 @@ public interface IPostRouterStore
     Task<EnqueueResult> EnqueueAsync(CanonicalPostIntent intent, byte[] canonicalBytes, string hash, CancellationToken cancellationToken = default);
     Task<PostSummary?> GetPostAsync(Guid postId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Account>> GetAccountsAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<AccountConnection>> GetAccountConnectionsAsync(CancellationToken cancellationToken = default);
+    Task<DashboardSummary> GetDashboardAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PublicationListItem>> GetPublicationsAsync(int limit, CancellationToken cancellationToken = default);
+    Task<PublicationDetail?> GetPublicationDetailAsync(Guid publicationId, CancellationToken cancellationToken = default);
+    Task<bool> RequestRetryAsync(Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken = default);
+    Task<bool> RequestReconcileAsync(Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken = default);
     Task<int> RequestCancelAsync(Guid postId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<QueueItem>> GetQueueAsync(CancellationToken cancellationToken = default);
     Task<Guid> StartWorkerRunAsync(DateTimeOffset now, CancellationToken cancellationToken = default);
@@ -80,6 +108,7 @@ public interface IPostRouterStore
 public interface IProviderAdapter
 {
     string ProviderKey { get; }
+    ProviderCapabilities Capabilities { get; }
     bool RequiresConnectedAccount { get; }
     void Validate(Content content, TargetIntent target);
     Task<ProviderStep> PlanNextStepAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken);
@@ -90,6 +119,7 @@ public interface IProviderAdapter
 public interface IProviderRegistry
 {
     IProviderAdapter GetRequired(string providerKey);
+    IReadOnlyList<ProviderCapabilities> GetCapabilities();
 }
 
 public interface IMetricsProvider

@@ -6,7 +6,7 @@ namespace PostRouter.Infrastructure;
 
 public sealed class SqliteDatabase
 {
-    internal const int CurrentSchemaVersion = 2;
+    internal const int CurrentSchemaVersion = 3;
     private readonly string _connectionString;
 
     public SqliteDatabase(string databasePath)
@@ -153,10 +153,17 @@ CREATE UNIQUE INDEX ux_auth_grants_account ON auth_grants(account_id) WHERE acco
 UPDATE installations SET schema_version=2;
 """;
 
+        private const string FailureCategories = """
+ALTER TABLE attempts ADD COLUMN failure_category TEXT NULL;
+ALTER TABLE publications ADD COLUMN failure_category TEXT NULL;
+UPDATE installations SET schema_version=3;
+""";
+
         public static IReadOnlyList<Migration> All { get; } =
         [
             new(1, "initial", Initial),
             new(2, "provider_accounts", ProviderAccounts),
+            new(3, "failure_categories", FailureCategories),
         ];
     }
 }

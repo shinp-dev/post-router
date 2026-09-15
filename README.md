@@ -2,9 +2,11 @@
 
 人間が用意したコンテンツを、公式APIで配信・予約し、結果を回収する単一ユーザー向けCLI。
 
-**状態: Phase 2A。Phase 1 durable coreに、X text-only Provider Adapterを実装済み / 2026-09-15。実credentialを使う受入確認は未実施です。**
+**状態: Phase 2B。Phase 1 durable coreとX text-only Adapterを操作するlocalhost GUIを実装済み / 2026-09-15。実credentialを使う受入確認は未実施です。**
 
 Phase 1は配信基盤の不変条件を実装・検証する段階であり、SNSへ通信しない。Fake Providerは `POST_ROUTER_PROFILE=test` を明示した場合だけ登録され、通常profileでFake結果を本番公開済みとして扱う経路はない。
+
+日常操作用GUIは`pub gui`で起動する。`127.0.0.1:43127`だけで待ち受けて既定browserを開き、workerは従来どおり別processまたはWindows Task Schedulerで動作する。browserを開かない場合は`pub gui --no-open`を使う。
 
 ## Phase 2A quick start
 
@@ -92,5 +94,6 @@ X text-only以外はPhase 2B以降の目標UXであり、まだ実行できな�
 | [最終設計監査](docs/design-review.md) | 指摘、修正、残留リスク |
 | [Phase 1実装監査](docs/phase1-review.md) | 実装境界、自動試験、実機gate |
 | [Phase 2A X](docs/phase2a-x.md) | X text投稿、OAuth、解除、二重投稿境界、検証状態 |
+| [Phase 2B GUI](docs/phase2b-gui.md) | localhost操作盤、Application境界、CSRF、画面・検証範囲 |
 
 公式APIの調査と設計判断は区別する。Instagramは公式本文の一部取得に制限があり、細部の未確認事項をAPI調査書のG-IGに明記した。設計完了は審査通過・本番動作確認を意味しない。
