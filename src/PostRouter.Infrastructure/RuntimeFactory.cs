@@ -22,11 +22,15 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         var grantLocks = new FileAuthGrantLockFactory(Path.Combine(dataDirectory, "locks"));
         var xClient = new XApiClient(httpClient, TimeProvider.System);
         var xAuth = new XAuthProvider(xClient, TimeProvider.System);
-        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth], TimeProvider.System);
-        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth], Auth);
+        var youtubeClient = new YouTubeApiClient(httpClient, TimeProvider.System);
+        var youtubeAuth = new YouTubeAuthProvider(youtubeClient, TimeProvider.System);
+        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth, youtubeAuth], TimeProvider.System);
+        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth, youtubeAuth], Auth);
+        var xAdapter = new XProviderAdapter(Auth, xClient, TimeProvider.System);
+        var youtubeAdapter = new YouTubeProviderAdapter(Auth, youtubeClient, TimeProvider.System);
         var adapters = fakeEnabled
-            ? new IProviderAdapter[] { fakeProvider, new XProviderAdapter(Auth, xClient, TimeProvider.System) }
-            : [new XProviderAdapter(Auth, xClient, TimeProvider.System)];
+            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter }
+            : [xAdapter, youtubeAdapter];
         var providers = new ProviderRegistry(adapters);
         Posts = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
         Operations = new(applicationStore, maintenanceGate, providers, Posts, TimeProvider.System, Approvals);
