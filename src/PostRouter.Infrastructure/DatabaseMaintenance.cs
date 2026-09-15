@@ -23,7 +23,7 @@ public sealed class DatabaseMaintenance(SqliteDatabase database, IMaintenanceGat
         var created = DateTimeOffset.UtcNow;
         var path = Path.Combine(destinationRoot, $"{prefix}-{created:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.db");
         await using (var source = await database.OpenAsync(cancellationToken))
-        await using (var destination = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate }.ToString()))
+        await using (var destination = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString()))
         {
             await destination.OpenAsync(cancellationToken);
             source.BackupDatabase(destination);
@@ -71,7 +71,7 @@ public sealed class DatabaseMaintenance(SqliteDatabase database, IMaintenanceGat
             if (!File.Exists(path) || new FileInfo(path).Length != file.Size || !string.Equals(file.Sha256, await HashFileAsync(path, cancellationToken), StringComparison.Ordinal))
                 throw new InvalidDataException($"Backup spool file '{file.Name}' failed validation.");
         }
-        await using (var check = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Mode = SqliteOpenMode.ReadOnly }.ToString()))
+        await using (var check = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
         {
             await check.OpenAsync(cancellationToken);
             var integrity = await SqliteDatabase.ScalarAsync<string>(check, null, "PRAGMA integrity_check", cancellationToken);
@@ -85,7 +85,7 @@ public sealed class DatabaseMaintenance(SqliteDatabase database, IMaintenanceGat
         if (Directory.Exists(stagedSpool)) Directory.Delete(stagedSpool, recursive: true);
         Directory.CreateDirectory(stagedSpool);
         foreach (var file in manifest.SpoolFiles) File.Copy(Path.Combine(backupSpool, file.Name), Path.Combine(stagedSpool, file.Name));
-        await using (var staged = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temp, Mode = SqliteOpenMode.ReadWrite }.ToString()))
+        await using (var staged = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temp, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()))
         {
             await staged.OpenAsync(cancellationToken);
             await SqliteDatabase.ExecuteAsync(staged, null, "PRAGMA journal_mode=DELETE", cancellationToken);

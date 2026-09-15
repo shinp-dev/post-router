@@ -63,7 +63,8 @@ public sealed class OperationsTests
         var results = await Task.WhenAll(coordinator.RefreshAsync(grantId), coordinator.RefreshAsync(grantId));
         Assert.Equal(1, context.Provider.RefreshCalls);
         Assert.All(results, result => Assert.Equal(1, result.Generation));
-        var bytes = await File.ReadAllBytesAsync(context.Database.DatabasePath);
+        var backup = await context.Maintenance.BackupAsync(Path.Combine(context.Directory, "secret-check"));
+        var bytes = await File.ReadAllBytesAsync(backup.Path);
         Assert.DoesNotContain("secret-access-marker", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
         Assert.DoesNotContain("secret-refresh-marker", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
     }
