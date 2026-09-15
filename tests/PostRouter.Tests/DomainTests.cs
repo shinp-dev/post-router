@@ -28,8 +28,24 @@ public sealed class DomainTests
         Assert.NotEqual(CanonicalIntent.Hash(CanonicalIntent.Serialize(Build(10))), CanonicalIntent.Hash(CanonicalIntent.Serialize(Build(20))));
     }
 
+    [Fact]
+    public void Approval_policy_changes_intent_identity()
+    {
+        var account = Guid.NewGuid();
+        CanonicalPostIntent Build(ApprovalPolicy policy) => new(
+            "key",
+            new Content(Guid.NewGuid(), ContentKind.TextOnly, "x", null, []),
+            [new TargetIntent(account, "fake", "public", "fake/v1", 1, "{}", ApprovalPolicy: policy)],
+            new ScheduleIntent(ScheduleMode.Immediate, DateTimeOffset.UtcNow, TimeSpan.FromMinutes(15)));
+        Assert.NotEqual(
+            CanonicalIntent.Hash(CanonicalIntent.Serialize(Build(ApprovalPolicy.Automatic))),
+            CanonicalIntent.Hash(CanonicalIntent.Serialize(Build(ApprovalPolicy.RequireApproval))));
+    }
+
     [Theory]
     [InlineData(PublicationState.Ready, PublicationState.Publishing, true)]
+    [InlineData(PublicationState.Ready, PublicationState.AwaitingApproval, true)]
+    [InlineData(PublicationState.AwaitingApproval, PublicationState.Ready, true)]
     [InlineData(PublicationState.Ready, PublicationState.Failed, true)]
     [InlineData(PublicationState.Unknown, PublicationState.Published, true)]
     [InlineData(PublicationState.Published, PublicationState.Publishing, false)]
