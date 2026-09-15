@@ -2,7 +2,7 @@
 
 人間が用意したコンテンツを、公式APIで配信・予約し、結果を回収する単一ユーザー向けCLI。
 
-**状態: Phase 2B。Phase 1 durable coreとX text-only Adapterを操作するlocalhost GUIを実装済み / 2026-09-15。実credentialを使う受入確認は未実施です。**
+**状態: Phase 2C-1。Phase 1 durable core、X text/image Adapter、localhost GUIを実装中 / 2026-09-15。実credentialを使う受入確認は未実施です。**
 
 Phase 1は配信基盤の不変条件を実装・検証する段階であり、SNSへ通信しない。Fake Providerは `POST_ROUTER_PROFILE=test` を明示した場合だけ登録され、通常profileでFake結果を本番公開済みとして扱う経路はない。
 
@@ -62,7 +62,7 @@ pub stats show --post <post-id> --layout provider-columns
 pub doctor --online --json
 ```
 
-X text-only以外はPhase 2B以降の目標UXであり、まだ実行できない。本番用 `release.json` の仕様は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
+Xのtext-onlyとJPEG画像（1〜4枚）以外は今後の目標UXであり、まだ実行できない。本番用 `release.json` の仕様は[CLI仕様](docs/cli.md)を参照。`targets.json` にはYouTubeの子ども向け設定など、媒体固有の意味を持つ設定を記述する。全対象の必須設定・能力検証を通ってからqueueへ登録する。text-onlyを4媒体へ指定すると非対応対象を示して全体を拒否する。勝手な画像化・動画化・本文切り詰めはしない。
 
 `--at` は希望公開時刻。YouTubeは事前アップロード後のnative予約、X/Instagramはローカル実行を使う。厳密な同時公開、電源OFF中のローカル投稿、ネットワーク越しのexactly-onceは保証しない。成否不明時は照合を優先し、自動再投稿しない。
 

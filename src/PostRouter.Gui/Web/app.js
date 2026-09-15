@@ -19,7 +19,7 @@ async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.method === "POST") {
     headers.set("X-Post-Router-CSRF", csrfToken);
-    headers.set("Content-Type", "application/json");
+    if (!(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   }
   const response = await fetch(path, { ...options, headers, cache: "no-store" });
   const body = await response.json().catch(() => ({}));
@@ -86,6 +86,15 @@ function renderProviders() {
     if (capability?.contentKinds.includes("TextOnly")) post.add(new Option(`${item.provider} / ${item.displayName || item.alias}`, item.accountId));
   });
   if (!post.options.length) post.add(new Option("接続済みアカウントがありません", ""));
+  updateImageCapability();
+}
+
+function updateImageCapability() {
+  const account = accounts.find(item => item.accountId === byId("post-account").value);
+  const capability = providers.find(item => item.providerKey === account?.provider);
+  const enabled = capability?.contentKinds.includes("ImageSet") === true;
+  byId("image-field").hidden = !enabled;
+  if (!enabled) byId("post-images").value = "";
 }
 
 function renderPublications(items) {
@@ -199,15 +208,27 @@ byId("detail-close").addEventListener("click", () => byId("detail-dialog").close
 byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").close());
 byId("schedule-enabled").addEventListener("change", event => { byId("schedule-field").hidden = !event.target.checked; byId("post-at").required = event.target.checked; });
 byId("post-text").addEventListener("input", event => { byId("text-count").textContent = `${[...event.target.value].length} / 280`; pendingRequestId = crypto.randomUUID(); });
+byId("post-account").addEventListener("change", updateImageCapability);
 
 byId("post-form").addEventListener("submit", async event => {
   event.preventDefault();
   try {
     const scheduled = byId("schedule-enabled").checked;
     const value = byId("post-at").value;
-    const body = { accountId: byId("post-account").value, text: byId("post-text").value, clientRequestId: pendingRequestId, publishAt: scheduled ? new Date(value).toISOString() : null };
-    const result = await request("/api/posts", { method: "POST", body: JSON.stringify(body) });
+    const publishAt = scheduled ? new Date(value).toISOString() : null;
+    const images = [...byId("post-images").files];
+    let result;
+    if (images.length) {
+      if (images.length > 4 || images.some(file => file.size > 5 * 1024 * 1024 || file.type !== "image/jpeg")) throw new Error("JPEG画像は最大4枚、各5 MBまでです。");
+      const body = new FormData(); body.set("accountId", byId("post-account").value); body.set("text", byId("post-text").value); body.set("clientRequestId", pendingRequestId);
+      if (publishAt) body.set("publishAt", publishAt); images.forEach(file => body.append("images", file));
+      result = await request("/api/posts/images", { method: "POST", body });
+    } else {
+      const body = { accountId: byId("post-account").value, text: byId("post-text").value, clientRequestId: pendingRequestId, publishAt };
+      result = await request("/api/posts", { method: "POST", body: JSON.stringify(body) });
+    }
     pendingRequestId = crypto.randomUUID(); byId("post-text").value = ""; byId("text-count").textContent = "0 / 280";
+    byId("post-images").value = "";
     showNotice(`Queueへ登録しました: ${result.postId}`); showView("publications"); await refreshAll();
   } catch (error) { showNotice(error.message, true); }
 });

@@ -54,6 +54,9 @@ public sealed record PublicationDetail(
 public sealed record CreateTextPostRequest(
     Guid AccountId, string Text, DateTimeOffset? PublishAt = null,
     string? ClientRequestId = null);
+public sealed record CreateImagePostRequest(
+    Guid AccountId, string Text, IReadOnlyList<MediaAsset> Images,
+    DateTimeOffset? PublishAt = null, string? ClientRequestId = null);
 public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
 {
     public string SafeCode { get; } = safeCode;

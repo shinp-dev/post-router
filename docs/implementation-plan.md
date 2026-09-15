@@ -37,7 +37,9 @@ Phase 1全体の自動試験は `tests/PostRouter.Tests` に置く。enqueue冪�
 
 ## Phase 2 — X
 
-Phase 2A実装済み（2026-09-15、実credential受入は未実施）: OAuth PKCE、安全なtoken保存/refresh/revoke、account disconnect/reset/reconnect、text-only create、Post ID保存、Unknown安全策。画像・動画・delete・metricsはPhase 2B以降へ残す。[Phase 2A記録](phase2a-x.md)
+Phase 2A実装済み（2026-09-15、実credential受入は未実施）: OAuth PKCE、安全なtoken保存/refresh/revoke、account disconnect/reset/reconnect、text-only create、Post ID保存、Unknown安全策。[Phase 2A記録](phase2a-x.md)
+
+Phase 2C-1ではX API v2 simple media uploadによるJPEG 1〜4枚を追加する。動画は公式仕様上chunked upload必須であり、現行jobのretry attemptと正常なsegment progressを分離する契約が必要なため、画像経路の完了後に扱う。
 
 理由: text/image/videoの3形式を一つのproviderで検証でき、canonical形式差と非冪等createの回復を早期に評価できる。費用を管理した小さいpilotに限定する。
 

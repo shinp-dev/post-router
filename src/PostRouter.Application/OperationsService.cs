@@ -39,28 +39,43 @@ public sealed class OperationsService(
     public async Task<EnqueueResult> EnqueueTextAsync(CreateTextPostRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Text)) throw new ArgumentException("Post text is required.");
+        return await EnqueueAsync(request.AccountId, request.Text, [], ContentKind.TextOnly,
+            request.PublishAt, request.ClientRequestId, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EnqueueResult> EnqueueImagesAsync(CreateImagePostRequest request, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.Text)) throw new ArgumentException("Post text is required.");
+        if (request.Images.Count is < 1 or > 4) throw new ArgumentException("Image posts require one to four images.");
+        return await EnqueueAsync(request.AccountId, request.Text, request.Images, ContentKind.ImageSet,
+            request.PublishAt, request.ClientRequestId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<EnqueueResult> EnqueueAsync(Guid accountId, string text, IReadOnlyList<MediaAsset> media,
+        ContentKind kind, DateTimeOffset? publishAt, string? clientRequestId, CancellationToken cancellationToken)
+    {
         var accounts = await posts.AccountsAsync(cancellationToken).ConfigureAwait(false);
-        var account = accounts.SingleOrDefault(candidate => candidate.Id == request.AccountId)
+        var account = accounts.SingleOrDefault(candidate => candidate.Id == accountId)
             ?? throw new KeyNotFoundException("Account not found.");
         var adapter = providers.GetRequired(account.ProviderKey);
         var capability = adapter.Capabilities;
-        if (!capability.ContentKinds.Contains(ContentKind.TextOnly))
-            throw new NotSupportedException("The selected provider does not support text posts.");
+        if (!capability.ContentKinds.Contains(kind))
+            throw new NotSupportedException("The selected provider does not support this content kind.");
         if (capability.Visibilities.Count == 0)
             throw new NotSupportedException("The selected provider has no supported visibility.");
         var visibility = capability.Visibilities[0];
         var now = timeProvider.GetUtcNow();
-        var dueAt = request.PublishAt?.ToUniversalTime() ?? now;
+        var dueAt = publishAt?.ToUniversalTime() ?? now;
         var schedule = new ScheduleIntent(
-            request.PublishAt is null ? ScheduleMode.Immediate : ScheduleMode.AtTime,
+            publishAt is null ? ScheduleMode.Immediate : ScheduleMode.AtTime,
             dueAt,
             TimeSpan.FromMinutes(15),
-            request.PublishAt?.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            publishAt?.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
             null,
-            request.PublishAt?.Offset);
+            publishAt?.Offset);
         var intent = new CanonicalPostIntent(
-            string.IsNullOrWhiteSpace(request.ClientRequestId) ? $"gui-{Guid.NewGuid():N}" : request.ClientRequestId,
-            new Content(Guid.NewGuid(), ContentKind.TextOnly, request.Text, null, []),
+            string.IsNullOrWhiteSpace(clientRequestId) ? $"gui-{Guid.NewGuid():N}" : clientRequestId,
+            new Content(Guid.NewGuid(), kind, text, null, media),
             [new TargetIntent(account.Id, account.ProviderKey, visibility, capability.OptionsSchema,
                 capability.OptionsVersion, capability.DefaultOptionsJson, account.Alias)],
             schedule);

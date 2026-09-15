@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PostRouter.Application;
@@ -33,7 +34,9 @@ public sealed class GuiHost(WebApplication application, PostRouterRuntime runtim
 
 public static class GuiApplication
 {
-    private const int MaximumRequestBodyBytes = 64 * 1024;
+    private const int MaximumJsonRequestBodyBytes = 64 * 1024;
+    private const long MaximumImageRequestBodyBytes = 21L * 1024 * 1024;
+    private const long MaximumImageBytes = 5L * 1024 * 1024;
     private static readonly string[] AssetNames = ["index.html", "app.css", "app.js"];
 
     public static async Task<GuiHost> StartAsync(GuiOptions options, CancellationToken cancellationToken = default)
@@ -49,9 +52,10 @@ public static class GuiApplication
             });
             builder.Logging.ClearProviders();
             builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+            builder.Services.Configure<FormOptions>(form => form.MultipartBodyLengthLimit = MaximumImageRequestBodyBytes);
             builder.WebHost.ConfigureKestrel(server =>
             {
-                server.Limits.MaxRequestBodySize = MaximumRequestBodyBytes;
+                server.Limits.MaxRequestBodySize = MaximumImageRequestBodyBytes;
                 server.AddServerHeader = false;
                 server.Listen(IPAddress.Loopback, options.Port);
             });
@@ -94,6 +98,13 @@ public static class GuiApplication
                 await context.Response.WriteAsJsonAsync(new GuiError("request_rejected", "The local request could not be verified."));
                 return;
             }
+            if (HttpMethods.IsPost(context.Request.Method) && !context.Request.Path.Equals(new PathString("/api/posts/images")) &&
+                context.Request.ContentLength > MaximumJsonRequestBodyBytes)
+            {
+                context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                await context.Response.WriteAsJsonAsync(new GuiError("request_too_large", "The request is too large."));
+                return;
+            }
             try { await next(context).ConfigureAwait(false); }
             catch (Exception ex)
             {
@@ -121,6 +132,49 @@ public static class GuiApplication
 
         app.MapPost("/api/posts", async (CreateTextPostRequest request, CancellationToken token) =>
             Results.Json(await runtime.Operations.EnqueueTextAsync(request, token).ConfigureAwait(false)));
+        app.MapPost("/api/posts/images", async (HttpRequest request, CancellationToken token) =>
+        {
+            var form = await request.ReadFormAsync(token).ConfigureAwait(false);
+            if (!Guid.TryParse(form["accountId"], out var accountId)) throw new ArgumentException("Account ID is invalid.");
+            var text = form["text"].ToString();
+            var clientRequestId = form["clientRequestId"].ToString();
+            DateTimeOffset? publishAt = null;
+            if (!string.IsNullOrWhiteSpace(form["publishAt"].ToString()))
+            {
+                if (!DateTimeOffset.TryParse(form["publishAt"], System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+                    throw new ArgumentException("Publish time is invalid.");
+                publishAt = parsed;
+            }
+            if (form.Files.Count is < 1 or > 4) throw new ArgumentException("One to four images are required.");
+            var incoming = Path.Combine(runtime.DataDirectory, "incoming");
+            Directory.CreateDirectory(incoming);
+            var temporary = new List<string>();
+            try
+            {
+                var assets = new List<PostRouter.Domain.MediaAsset>();
+                foreach (var file in form.Files)
+                {
+                    if (file.Length is <= 0 or > MaximumImageBytes) throw new ArgumentException("Each image must be between 1 byte and 5 MB.");
+                    var path = Path.Combine(incoming, $"{Guid.NewGuid():N}.upload");
+                    temporary.Add(path);
+                    await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                        1024 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                        await file.CopyToAsync(output, token).ConfigureAwait(false);
+                    if (!await IsJpegAsync(path, token).ConfigureAwait(false))
+                        throw new ArgumentException("Only JPEG images are supported.");
+                    var asset = await runtime.Spool.ImportAsync(path, token).ConfigureAwait(false);
+                    assets.Add(asset);
+                }
+                return Results.Json(await runtime.Operations.EnqueueImagesAsync(
+                    new(accountId, text, assets, publishAt, clientRequestId), token).ConfigureAwait(false));
+            }
+            finally
+            {
+                foreach (var path in temporary)
+                    try { File.Delete(path); } catch (IOException) { }
+            }
+        });
         app.MapPost("/api/posts/{postId:guid}/cancel", async (Guid postId, CancellationToken token) =>
         {
             var changed = await runtime.Operations.CancelAsync(postId, token).ConfigureAwait(false);
@@ -210,6 +264,15 @@ public static class GuiApplication
     }
 
     private static Uri CallbackUri(HttpRequest request) => new($"{request.Scheme}://{request.Host.Value}/oauth/callback");
+
+    private static async Task<bool> IsJpegAsync(string path, CancellationToken cancellationToken)
+    {
+        var header = new byte[3];
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return await stream.ReadAsync(header, cancellationToken).ConfigureAwait(false) == header.Length &&
+            header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff;
+    }
 
     private static void AddSecurityHeaders(IHeaderDictionary headers)
     {

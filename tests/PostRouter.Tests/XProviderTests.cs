@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using PostRouter.Application;
@@ -70,6 +71,155 @@ public sealed class XProviderTests
         Assert.Equal(1, requests);
         Assert.Equal(0, await setup.Worker.RunOnceAsync());
         Assert.Equal(1, requests);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Image_post_uploads_media_then_creates_post_through_durable_checkpoint()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "image.jpg");
+        byte[] image = [0xff, 0xd8, 0xff, 0x01];
+        await File.WriteAllBytesAsync(imagePath, image);
+        using var http = Client(async (request, call, cancellationToken) =>
+        {
+            if (call == 1)
+            {
+                Assert.Equal("/2/media/upload", request.RequestUri?.AbsolutePath);
+                var upload = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+                Assert.Contains((byte)0xff, upload);
+                return Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"media-1\"}}");
+            }
+            Assert.Equal("/2/tweets", request.RequestUri?.AbsolutePath);
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Assert.Contains("media-1", body);
+            return Json(HttpStatusCode.Created, "{\"data\":{\"id\":\"123\"}}");
+        });
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var asset = new MediaAsset(Guid.NewGuid(), Convert.ToHexStringLower(SHA256.HashData(image)), image.Length, "image/jpeg", imagePath);
+        var intent = new CanonicalPostIntent("x-image", new Content(Guid.NewGuid(), ContentKind.ImageSet, "caption", null, [asset]),
+            [new TargetIntent(setup.Account.AccountId, "x", "public", "x-options/v1", 1, "{}", "x-test")],
+            new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(15)));
+        var queued = await setup.Posts.EnqueueAsync(intent);
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.Ready, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        var saved = await setup.Posts.GetAsync(queued.PostId);
+        Assert.Equal(PublicationState.Published, Assert.Single(saved!.Publications).State);
+        Assert.Equal("123", Assert.Single(saved.RemoteObjects).ProviderObjectId);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Image_upload_network_loss_is_retried_before_single_post_creation()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "retry.jpg");
+        byte[] image = [0xff, 0xd8, 0xff, 0x02];
+        await File.WriteAllBytesAsync(imagePath, image);
+        var uploads = 0;
+        var creates = 0;
+        using var http = Client((request, call, _) =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/2/media/upload")
+            {
+                Interlocked.Increment(ref uploads);
+                if (call == 1) throw new HttpRequestException("simulated upload response loss");
+                return Task.FromResult(Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"media-retry\"}}"));
+            }
+            Interlocked.Increment(ref creates);
+            return Task.FromResult(Json(HttpStatusCode.Created, "{\"data\":{\"id\":\"987\"}}"));
+        });
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var queued = await setup.Posts.EnqueueAsync(XImageIntent(context, setup.Account.AccountId, "image-retry", "caption", imagePath, image));
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        context.Time.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+
+        Assert.Equal(2, uploads);
+        Assert.Equal(1, creates);
+        Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Image_integrity_mismatch_fails_without_sending_bytes()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "changed.jpg");
+        byte[] original = [0xff, 0xd8, 0xff, 0x03];
+        await File.WriteAllBytesAsync(imagePath, original);
+        var calls = 0;
+        using var http = Client((_, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(Json(HttpStatusCode.OK, "{}"));
+        });
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var intent = XImageIntent(context, setup.Account.AccountId, "image-mutated", "caption", imagePath, original);
+        var queued = await setup.Posts.EnqueueAsync(intent);
+        await File.WriteAllBytesAsync(imagePath, [0xff, 0xd8, 0xff, 0x04]);
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        var publication = Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications);
+        Assert.Equal(PublicationState.Failed, publication.State);
+        Assert.Equal("media_integrity_mismatch", publication.SafeError);
+        Assert.Equal(0, calls);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Crash_after_prepared_image_upload_is_requeued_without_unknown_publication()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "crash.jpg");
+        byte[] image = [0xff, 0xd8, 0xff, 0x05];
+        await File.WriteAllBytesAsync(imagePath, image);
+        using var http = Client((_, _, _) => throw new InvalidOperationException("HTTP must not be called"));
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var queued = await setup.Posts.EnqueueAsync(XImageIntent(context, setup.Account.AccountId, "image-crash", "caption", imagePath, image));
+        var firstRun = await context.Store.StartWorkerRunAsync(context.Time.GetUtcNow());
+        var item = Assert.Single(await context.Store.ClaimDueAsync(firstRun, context.Time.GetUtcNow(), 1));
+        var step = await setup.Adapter.PlanNextStepAsync(item.Input, item.Checkpoint, default);
+        Assert.Equal(ReplaySafety.SafeRepeatNoPublication, step.ReplaySafety);
+        Assert.NotNull(await context.Store.PrepareDispatchAsync(item, step, context.Time.GetUtcNow()));
+        await context.Store.StopWorkerRunAsync(firstRun, context.Time.GetUtcNow());
+
+        var secondRun = await context.Store.StartWorkerRunAsync(context.Time.GetUtcNow());
+        await context.Store.RecoverAbandonedClaimsAsync(secondRun, context.Time.GetUtcNow());
+        await context.Store.StopWorkerRunAsync(secondRun, context.Time.GetUtcNow());
+
+        Assert.Equal(PublicationState.Ready, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Contains(await setup.Posts.QueueAsync(), job => job.OwnerId == Assert.Single(queued.PublicationIds) && job.State == JobState.Queued);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Image_post_create_response_loss_is_unknown_and_never_recreates_post()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var imagePath = Path.Combine(context.Directory, "unknown.jpg");
+        byte[] image = [0xff, 0xd8, 0xff, 0x06];
+        await File.WriteAllBytesAsync(imagePath, image);
+        var creates = 0;
+        using var http = Client((request, _, _) =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/2/media/upload")
+                return Task.FromResult(Json(HttpStatusCode.OK, "{\"data\":{\"id\":\"media-unknown\"}}"));
+            Interlocked.Increment(ref creates);
+            return Task.FromResult(Json(HttpStatusCode.Created, "{\"data\":{}}"));
+        });
+        var setup = await BuildAsync(context, http, "remote-user", "access-token", context.Time.GetUtcNow().AddHours(1));
+        var queued = await setup.Posts.EnqueueAsync(XImageIntent(context, setup.Account.AccountId, "image-unknown", "caption", imagePath, image));
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.Unknown, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, creates);
         await setup.Worker.DisposeAsync();
     }
 
@@ -315,6 +465,14 @@ public sealed class XProviderTests
         new(key, new Content(Guid.NewGuid(), ContentKind.TextOnly, text, null, []),
             [new TargetIntent(accountId, "x", "public", "x-options/v1", 1, "{}", "x-test")],
             new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(15)));
+
+    private static CanonicalPostIntent XImageIntent(TestContext context, Guid accountId, string key, string text, string path, byte[] bytes)
+    {
+        var asset = new MediaAsset(Guid.NewGuid(), Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.LongLength, "image/jpeg", path);
+        return new(key, new Content(Guid.NewGuid(), ContentKind.ImageSet, text, null, [asset]),
+            [new TargetIntent(accountId, "x", "public", "x-options/v1", 1, "{}", "x-test")],
+            new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(15)));
+    }
 
     private static ProviderPublication Publication(string text, Guid accountId)
     {

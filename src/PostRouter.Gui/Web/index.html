@@ -32,11 +32,12 @@
       <form id="post-form" class="panel form-grid">
         <label>アカウント<select id="post-account" required></select></label>
         <label class="wide">本文<textarea id="post-text" rows="7" maxlength="280" required placeholder="投稿本文"></textarea><span id="text-count" class="hint">0 / 280</span></label>
+        <label id="image-field" class="wide" hidden>JPEG画像（最大4枚・各5 MB）<input id="post-images" type="file" accept="image/jpeg" multiple></label>
         <label class="choice"><input id="schedule-enabled" type="checkbox"> 日時を指定する</label>
         <label id="schedule-field" hidden>投稿日時<input id="post-at" type="datetime-local"></label>
         <div class="wide actions"><button type="submit">Queueへ登録</button></div>
       </form>
-      <p class="hint">現在はProvider capabilityに基づくtext-only投稿を受け付けます。送信は既存workerが担当します。</p>
+      <p class="hint">Provider capabilityに基づき、本文のみまたはJPEG画像付き投稿を受け付けます。送信は既存workerが担当します。</p>
     </section>
 
     <section id="publications" class="view">

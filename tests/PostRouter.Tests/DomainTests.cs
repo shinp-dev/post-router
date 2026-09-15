@@ -30,6 +30,7 @@ public sealed class DomainTests
 
     [Theory]
     [InlineData(PublicationState.Ready, PublicationState.Publishing, true)]
+    [InlineData(PublicationState.Ready, PublicationState.Failed, true)]
     [InlineData(PublicationState.Unknown, PublicationState.Published, true)]
     [InlineData(PublicationState.Published, PublicationState.Publishing, false)]
     [InlineData(PublicationState.Expired, PublicationState.Pending, false)]
