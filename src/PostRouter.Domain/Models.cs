@@ -16,6 +16,7 @@ public enum StepEffect { ReadOnly, UploadOnly, CreateRemoteObject, MayPublish, U
 public enum ReplaySafety { SafeRead, ResumeKnownHandle, IdempotentExistingObject, NotReplayable }
 public enum EffectCertainty { NotSent, NoSideEffect, Confirmed, Ambiguous }
 public enum StepOutcome { Completed, Pending, Rejected, Ambiguous }
+public enum FailureCategory { Authentication, RateLimit, Network, Provider, InvalidInput, Unknown }
 public enum MetricValueStatus { Available, Unsupported, NotAuthorized, NotYetAvailable, NotReturned, Redacted, Error }
 
 public sealed record MediaAsset(
@@ -63,7 +64,7 @@ public sealed record ProviderStep(
 public sealed record StepResult(
     StepOutcome Outcome, EffectCertainty EffectCertainty, string? RemoteObjectId = null,
     string? Checkpoint = null, string? SafeError = null, DateTimeOffset? RetryAt = null,
-    PublicationState? ObservedState = null);
+    PublicationState? ObservedState = null, FailureCategory? FailureCategory = null);
 
 public sealed record EnqueueResult(Guid PostId, bool Existing, IReadOnlyList<Guid> PublicationIds);
 

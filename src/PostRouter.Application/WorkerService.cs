@@ -122,14 +122,14 @@ public sealed class WorkerService(
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 result = step.Effect is StepEffect.MayPublish or StepEffect.CreateRemoteObject
-                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: "operation_cancelled_after_dispatch")
-                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: "operation_cancelled");
+                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: "operation_cancelled_after_dispatch", FailureCategory: FailureCategory.Unknown)
+                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: "operation_cancelled", FailureCategory: FailureCategory.Network);
             }
             catch (Exception ex)
             {
                 result = step.Effect is StepEffect.MayPublish or StepEffect.CreateRemoteObject
-                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: ex.GetType().Name)
-                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.GetType().Name);
+                    ? new StepResult(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: ex.GetType().Name, FailureCategory: FailureCategory.Unknown)
+                    : new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.GetType().Name, FailureCategory: FailureCategory.Provider);
             }
             if (result.Outcome == StepOutcome.Pending && result.RetryAt is null)
                 result = result with { RetryAt = _retryPolicy.NextAttempt(timeProvider.GetUtcNow(), item.Job.AttemptNo + 1) };

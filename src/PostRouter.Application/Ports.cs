@@ -49,7 +49,7 @@ public sealed record PublicationListItem(
 public sealed record PublicationDetail(
     PublicationListItem Summary, string? Text, string Visibility, string OptionsSchema,
     DateTimeOffset? FirstSubmittedAt, DateTimeOffset? ConfirmedAt,
-    string? ProviderError, string? NormalizedError, bool ReconcileQueued,
+    string? ProviderError, FailureCategory? NormalizedError, bool ReconcileQueued,
     bool CanCancel, bool CanRetry, bool CanReconcile);
 public sealed record CreateTextPostRequest(
     Guid AccountId, string Text, DateTimeOffset? PublishAt = null,

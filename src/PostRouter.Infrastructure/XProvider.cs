@@ -307,37 +307,49 @@ internal sealed class XProviderAdapter(AuthCoordinator auth, XApiClient client, 
     {
         XPublishPlan plan;
         try { plan = JsonSerializer.Deserialize<XPublishPlan>(providerStep.OpaquePlan ?? string.Empty) ?? throw new JsonException(); }
-        catch (JsonException) { return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "x_plan_invalid"); }
+        catch (JsonException) { return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "x_plan_invalid", FailureCategory: FailureCategory.InvalidInput); }
         TokenMaterial token;
         try { token = await auth.GetValidTokenAsync(plan.AccountId, cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (XProviderException ex)
         {
             return ex.Retryable
-                ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode)
-                : new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, ObservedState: PublicationState.NeedsAttention);
+                ? new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, FailureCategory: Classify(ex.SafeCode))
+                : new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: ex.SafeCode, ObservedState: PublicationState.NeedsAttention, FailureCategory: Classify(ex.SafeCode));
         }
         catch (InvalidOperationException ex) when (string.Equals(ex.Message, "auth_required", StringComparison.Ordinal))
         {
-            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "auth_required", ObservedState: PublicationState.NeedsAttention);
+            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "auth_required", ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.Authentication);
         }
         catch (Exception ex) when (ex is CryptographicException or InvalidDataException or KeyNotFoundException)
         {
-            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "credential_unavailable", ObservedState: PublicationState.NeedsAttention);
+            return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: "credential_unavailable", ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.Authentication);
         }
 
         var result = await client.CreateTextPostAsync(token.AccessToken, plan.Text, cancellationToken).ConfigureAwait(false);
         if (result.Success) return new(StepOutcome.Completed, EffectCertainty.Confirmed, result.PostId, ObservedState: PublicationState.Published);
-        if (result.Ambiguous) return new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: result.SafeError);
-        if (result.RetryAt is not null) return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: result.SafeError, RetryAt: result.RetryAt);
+        if (result.Ambiguous) return new(StepOutcome.Ambiguous, EffectCertainty.Ambiguous, SafeError: result.SafeError, FailureCategory: Classify(result.SafeError));
+        if (result.RetryAt is not null) return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
         var observed = string.Equals(result.SafeError, "x_auth_or_scope_rejected", StringComparison.Ordinal)
             ? PublicationState.NeedsAttention
             : (PublicationState?)null;
-        return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: result.SafeError, ObservedState: observed);
+        return new(StepOutcome.Rejected, EffectCertainty.NoSideEffect, SafeError: result.SafeError, ObservedState: observed, FailureCategory: Classify(result.SafeError));
     }
 
     public Task<StepResult> ReconcileAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken) =>
-        Task.FromResult(new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: "x_reconcile_inconclusive", RetryAt: timeProvider.GetUtcNow().AddMinutes(15)));
+        Task.FromResult(new StepResult(StepOutcome.Pending, EffectCertainty.NoSideEffect, SafeError: "x_reconcile_inconclusive", RetryAt: timeProvider.GetUtcNow().AddMinutes(15), FailureCategory: FailureCategory.Unknown));
+
+    private static FailureCategory Classify(string? safeCode) => safeCode switch
+    {
+        "x_rate_limited" => FailureCategory.RateLimit,
+        "x_network_unavailable" or "x_publish_response_lost" => FailureCategory.Network,
+        "x_auth_or_scope_rejected" or "x_token_rejected" or "x_reconnect_required" or
+            "auth_required" or "credential_unavailable" => FailureCategory.Authentication,
+        "x_plan_invalid" => FailureCategory.InvalidInput,
+        "x_publish_ambiguous_server_error" or "x_publish_malformed_success" or
+            "x_reconcile_inconclusive" => FailureCategory.Unknown,
+        _ => FailureCategory.Provider,
+    };
 
     private sealed record XPublishPlan(Guid AccountId, string Text);
 }

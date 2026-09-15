@@ -61,6 +61,7 @@ public sealed class GuiOperationsTests
         Assert.True(detail.CanReconcile);
         Assert.True(detail.ReconcileQueued);
         Assert.False(detail.CanRetry);
+        Assert.Equal(FailureCategory.Unknown, detail.NormalizedError);
         await context.Operations.ReconcileAsync(publicationId);
         _ = await context.Worker.RunOnceAsync();
         Assert.Equal(1, context.Provider.PublishCalls);
@@ -71,12 +72,15 @@ public sealed class GuiOperationsTests
     {
         await using var context = await TestContext.CreateAsync();
         context.Provider.QueuePublish(new StepResult(StepOutcome.Rejected, EffectCertainty.NoSideEffect,
-            SafeError: "auth_required", ObservedState: PublicationState.NeedsAttention));
+            SafeError: "auth_required", ObservedState: PublicationState.NeedsAttention, FailureCategory: FailureCategory.Authentication));
         var queued = await context.Posts.EnqueueAsync(context.Intent("gui-auth-retry"));
         _ = await context.Worker.RunOnceAsync();
         var publicationId = Assert.Single(queued.PublicationIds);
 
-        Assert.True((await context.Operations.PublicationAsync(publicationId))!.CanRetry);
+        var authenticationDetail = (await context.Operations.PublicationAsync(publicationId))!;
+        Assert.True(authenticationDetail.CanRetry);
+        Assert.Equal("auth_required", authenticationDetail.ProviderError);
+        Assert.Equal(FailureCategory.Authentication, authenticationDetail.NormalizedError);
         await context.Operations.RetryAsync(publicationId);
         _ = await context.Worker.RunOnceAsync();
         Assert.Equal(PublicationState.Published, (await context.Operations.PublicationAsync(publicationId))!.Summary.PublicationState);

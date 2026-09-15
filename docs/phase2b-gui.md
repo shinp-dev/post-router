@@ -18,7 +18,7 @@ GUIはSQLite table、vault、X Adapter、HTTP clientへ直接アクセスしな�
 
 - Dashboard: Scheduled、Pending、Processing、Published、Failed、NeedsAttention、Unknown、Cancelled、Expired、認証エラーと接続済みaccount
 - 投稿作成: capabilityがtextを許す接続済みaccount、本文、即時/予約、enqueue
-- 投稿一覧/詳細: raw Publication/Job state、予定、attempt、remote ID、安全化済みerror、timestamp
+- 投稿一覧/詳細: raw Publication/Job state、予定、attempt、remote ID、Provider固有の安全化済みerror、正規化したfailure category、timestamp
 - 操作: Domainが許可するcancel、Failedかつ副作用なしと確認できる場合だけretry、Unknown等へのread-only Reconcile
 - Account: 非秘密metadata、Connect、Disconnect、Reconnect、Revoke
 
@@ -57,6 +57,8 @@ pub gui --port 43127 --no-open
 - Reconcileの即時queue要求
 
 retryはDomain上の`Failed -> Pending -> Ready`、または`NeedsAttention -> Failed -> Pending -> Ready`を順に検証し、直近publish Attemptが`NotSent`/`NoSideEffect`、過去にAmbiguousなし、remote objectなし、active jobなしの場合だけ同一transactionで再開する。Unknownからretryする経路はない。
+
+Provider Adapterは固有error codeを`Authentication`、`RateLimit`、`Network`、`Provider`、`InvalidInput`、`Unknown`の共通`FailureCategory`へ分類する。SQLite schema v3は固有のsafe errorとcategoryを別々に保持するため、GUIが意味を潰さず両方を表示できる。Xのcode判定はX Adapter内に閉じ、Application/DB queryはX固有codeを知らない。
 
 ## 検証境界
 

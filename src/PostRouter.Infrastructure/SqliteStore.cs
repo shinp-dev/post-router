@@ -140,10 +140,13 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id WHERE p.post_id=$id O
         await using var command = connection.CreateCommand();
         command.CommandText = """
 SELECT a.id,a.provider_key,a.alias,a.status,a.remote_subject,a.display_name,a.client_id,a.scope,g.expires_at,
-  (SELECT p.safe_error FROM publications p
-   WHERE p.account_id=a.id AND p.state='NeedsAttention'
-     AND p.safe_error IN ('auth_required','credential_unavailable','x_auth_or_scope_rejected','x_token_refresh_rejected')
-   ORDER BY p.created_at DESC LIMIT 1)
+  COALESCE(
+    (SELECT p.safe_error FROM publications p
+     WHERE p.account_id=a.id AND p.state='NeedsAttention' AND p.failure_category='Authentication'
+     ORDER BY p.created_at DESC LIMIT 1),
+    CASE WHEN a.status='Disconnected' AND EXISTS(
+      SELECT 1 FROM jobs pending JOIN publications publication ON publication.id=pending.publication_id
+      WHERE publication.account_id=a.id AND pending.state IN ('Queued','Claimed','Blocked')) THEN 'auth_disconnected' END)
 FROM accounts a LEFT JOIN auth_grants g ON g.id=a.auth_grant_id
 ORDER BY a.provider_key,a.alias
 """;
@@ -176,7 +179,10 @@ SELECT
   SUM(CASE WHEN p.state='Unknown' THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Cancelled' THEN 1 ELSE 0 END),
   SUM(CASE WHEN p.state='Expired' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN p.state='NeedsAttention' AND p.safe_error IN ('auth_required','credential_unavailable','x_auth_or_scope_rejected','x_token_refresh_rejected') THEN 1 ELSE 0 END)
+  COALESCE(SUM(CASE WHEN p.state='NeedsAttention' AND p.failure_category='Authentication' THEN 1 ELSE 0 END),0)
+    + (SELECT COUNT(*) FROM accounts account WHERE account.status='Disconnected' AND EXISTS(
+      SELECT 1 FROM jobs pending JOIN publications publication ON publication.id=pending.publication_id
+      WHERE publication.account_id=account.id AND pending.state IN ('Queued','Claimed','Blocked')))
 FROM publications p JOIN schedules s ON s.id=p.schedule_id
 """;
         command.Parameters.AddWithValue("$now", At(now));
@@ -215,8 +221,9 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id
         var providerError = reader.IsDBNull(22) ? null : reader.GetString(22);
         var reconcileQueued = reader.GetInt64(23) != 0;
         var retrySafe = reader.GetInt64(24) != 0 && summary.RemoteId is null;
+        var normalizedError = reader.IsDBNull(25) ? null : Enum.Parse<FailureCategory>(reader.GetString(25));
         return new(summary, text, visibility, optionsSchema, submitted, confirmed, providerError,
-            summary.SafeError, reconcileQueued, PublicationStateMachine.CanCancel(summary.PublicationState),
+            normalizedError, reconcileQueued, PublicationStateMachine.CanCancel(summary.PublicationState),
             PublicationStateMachine.CanRetry(summary.PublicationState) && retrySafe,
             PublicationStateMachine.CanReconcile(summary.PublicationState));
     }
@@ -252,7 +259,7 @@ WHERE j.publication_id=$id AND j.kind='Publish' AND a.effect_certainty='Ambiguou
         PublicationStateMachine.EnsureCanTransition(state, PublicationState.Pending);
         PublicationStateMachine.EnsureCanTransition(PublicationState.Pending, PublicationState.Ready);
         await SqliteDatabase.ExecuteAsync(connection, transaction,
-            "UPDATE publications SET state='Ready',safe_error=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
+            "UPDATE publications SET state='Ready',safe_error=NULL,failure_category=NULL,generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(publicationId)));
         await SqliteDatabase.ExecuteAsync(connection, transaction,
             "INSERT INTO jobs(id,kind,publication_id,priority,step_key,state,due_at) VALUES($job,'Publish',$publication,100,'manual-retry','Queued',$due)", cancellationToken,
             ("$job", Id(Guid.NewGuid())), ("$publication", Id(publicationId)), ("$due", At(now)));
@@ -355,7 +362,7 @@ WHERE j.state='Claimed' AND (j.worker_run_id IS NULL OR j.worker_run_id<>$run) A
                 continue;
             }
             await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job)));
-            await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='Unknown',safe_error='crash_after_dispatch',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Publication)));
+            await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='Unknown',safe_error='crash_after_dispatch',failure_category='Unknown',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Publication)));
             await EnsureReconcileJobAsync(connection, transaction, item.Publication, now, cancellationToken);
         }
         transaction.Commit();
@@ -456,8 +463,9 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
         await using var connection = await database.OpenAsync(cancellationToken);
         await using var transaction = connection.BeginTransaction();
         await SqliteDatabase.ExecuteAsync(connection, transaction,
-            "UPDATE attempts SET dispatch_state='ReceiptCommitted',effect_certainty=$certainty,receipt_ref=$receipt,safe_error=$error,finished_at=$at WHERE id=$id", cancellationToken,
-            ("$certainty", result.EffectCertainty.ToString()), ("$receipt", result.RemoteObjectId), ("$error", result.SafeError), ("$at", At(now)), ("$id", Id(attempt.Id)));
+            "UPDATE attempts SET dispatch_state='ReceiptCommitted',effect_certainty=$certainty,receipt_ref=$receipt,safe_error=$error,failure_category=$category,finished_at=$at WHERE id=$id", cancellationToken,
+            ("$certainty", result.EffectCertainty.ToString()), ("$receipt", result.RemoteObjectId), ("$error", result.SafeError),
+            ("$category", result.FailureCategory?.ToString()), ("$at", At(now)), ("$id", Id(attempt.Id)));
 
         var currentState = Enum.Parse<PublicationState>(await SqliteDatabase.ScalarAsync<string>(connection, transaction,
             "SELECT state FROM publications WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.Id)))
@@ -484,7 +492,7 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
                     var state = result.ObservedState ?? (attempt.Effect == StepEffect.MayPublish ? PublicationState.Published : PublicationState.Ready);
                     PublicationStateMachine.EnsureCanTransition(currentState, state);
                     await SqliteDatabase.ExecuteAsync(connection, transaction,
-                        "UPDATE publications SET state=$state,confirmed_at=$confirmed,published_at=$published,safe_error=NULL,generation=generation+1 WHERE id=$id", cancellationToken,
+                        "UPDATE publications SET state=$state,confirmed_at=$confirmed,published_at=$published,safe_error=NULL,failure_category=NULL,generation=generation+1 WHERE id=$id", cancellationToken,
                         ("$state", state.ToString()), ("$confirmed", At(now)), ("$published", state == PublicationState.Published ? At(now) : null), ("$id", Id(item.Publication.Id)));
                     await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
                     break;
@@ -498,7 +506,8 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
                 }
                 if (item.Job.AttemptNo + 1 >= 8)
                 {
-                    await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='NeedsAttention',safe_error='retry_limit_reached',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.Id)));
+                    await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='NeedsAttention',safe_error='retry_limit_reached',failure_category=$category,generation=generation+1 WHERE id=$id", cancellationToken,
+                        ("$category", result.FailureCategory?.ToString() ?? FailureCategory.Provider.ToString()), ("$id", Id(item.Publication.Id)));
                     await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
                 }
                 else
@@ -510,11 +519,13 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
                     ? PublicationState.Cancelled
                     : result.ObservedState ?? PublicationState.Failed;
                 PublicationStateMachine.EnsureCanTransition(currentState, rejectedState);
-                await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state=$state,safe_error=$error,generation=generation+1 WHERE id=$id", cancellationToken, ("$state", rejectedState.ToString()), ("$error", result.SafeError), ("$id", Id(item.Publication.Id)));
+                await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state=$state,safe_error=$error,failure_category=$category,generation=generation+1 WHERE id=$id", cancellationToken,
+                    ("$state", rejectedState.ToString()), ("$error", result.SafeError), ("$category", result.FailureCategory?.ToString()), ("$id", Id(item.Publication.Id)));
                 await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
                 break;
             case StepOutcome.Ambiguous:
-                await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='Unknown',safe_error=$error,generation=generation+1 WHERE id=$id", cancellationToken, ("$error", result.SafeError), ("$id", Id(item.Publication.Id)));
+                await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE publications SET state='Unknown',safe_error=$error,failure_category=$category,generation=generation+1 WHERE id=$id", cancellationToken,
+                    ("$error", result.SafeError), ("$category", (result.FailureCategory ?? FailureCategory.Unknown).ToString()), ("$id", Id(item.Publication.Id)));
                 await SqliteDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET state='Done',generation=generation+1 WHERE id=$id", cancellationToken, ("$id", Id(item.Job.Id)));
                 await EnsureReconcileJobAsync(connection, transaction, item.Publication.Id, now, cancellationToken);
                 break;
@@ -911,7 +922,8 @@ SELECT p.post_id,p.id,p.provider_key,p.account_id,a.alias,
     WHERE attempt_job.publication_id=p.id AND attempt_job.kind='Publish' AND attempt.effect_certainty IN ('NotSent','NoSideEffect')
       AND attempt.started_at=(SELECT MAX(last_attempt.started_at) FROM attempts last_attempt JOIN jobs last_job ON last_job.id=last_attempt.job_id WHERE last_job.publication_id=p.id AND last_job.kind='Publish'))
    AND NOT EXISTS(SELECT 1 FROM attempts ambiguous JOIN jobs ambiguous_job ON ambiguous_job.id=ambiguous.job_id
-     WHERE ambiguous_job.publication_id=p.id AND ambiguous_job.kind='Publish' AND ambiguous.effect_certainty='Ambiguous'))
+     WHERE ambiguous_job.publication_id=p.id AND ambiguous_job.kind='Publish' AND ambiguous.effect_certainty='Ambiguous')),
+  COALESCE(p.failure_category,(SELECT category_attempt.failure_category FROM attempts category_attempt JOIN jobs category_job ON category_job.id=category_attempt.job_id WHERE category_job.publication_id=p.id ORDER BY category_attempt.started_at DESC LIMIT 1))
 FROM publications p
 JOIN posts post ON post.id=p.post_id
 JOIN contents content ON content.id=post.content_id
