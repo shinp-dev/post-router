@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -219,7 +220,7 @@ public sealed class XProviderTests
         using var http = Client((_, _, _) =>
         {
             var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
-            response.Headers.TryAddWithoutValidation("x-rate-limit-reset", context.Time.GetUtcNow().AddMinutes(3).ToUnixTimeSeconds().ToString());
+            response.Headers.TryAddWithoutValidation("x-rate-limit-reset", context.Time.GetUtcNow().AddMinutes(3).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture));
             return Task.FromResult(response);
         });
         var setup = await BuildAsync(context, http, "remote-user", "access", context.Time.GetUtcNow().AddHours(1));
