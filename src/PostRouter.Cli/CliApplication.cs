@@ -294,16 +294,17 @@ public static class CliApplication
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
             return await runtime.Posts.AccountsAsync(token);
         }));
-        var connect = new Command("connect", "Connect an X account with OAuth 2.0 PKCE");
+        var connect = new Command("connect", "Connect a provider account with OAuth 2.0 PKCE");
         var connectProvider = new Argument<string>("provider");
         var clientId = new Option<string>("--client-id") { Required = true };
-        var redirectUri = new Option<Uri>("--redirect-uri") { Required = true };
+        var redirectUri = new Option<string>("--redirect-uri") { Required = true };
         var alias = new Option<string?>("--alias");
         connect.Arguments.Add(connectProvider); connect.Options.Add(clientId); connect.Options.Add(redirectUri); connect.Options.Add(alias);
         connect.SetAction((result, token) => ExecuteAsync(async () =>
         {
+            var parsedRedirect = ParseRedirectUri(result.GetValue(redirectUri));
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var session = runtime.Accounts.BeginConnect(result.GetValue(connectProvider)!, result.GetValue(clientId)!, result.GetValue(redirectUri)!, result.GetValue(alias));
+            var session = runtime.Accounts.BeginConnect(result.GetValue(connectProvider)!, result.GetValue(clientId)!, parsedRedirect, result.GetValue(alias));
             var callback = await ReceiveOAuthCallbackAsync(session, token);
             return await runtime.Accounts.CompleteConnectAsync(session, callback.Code, callback.State, token);
         }));
@@ -327,12 +328,13 @@ public static class CliApplication
         }));
         var reconnect = new Command("reconnect", "Reconnect the same remote account");
         var reconnectAccount = new Option<Guid>("--account") { Required = true };
-        var reconnectRedirect = new Option<Uri>("--redirect-uri") { Required = true };
+        var reconnectRedirect = new Option<string>("--redirect-uri") { Required = true };
         reconnect.Options.Add(reconnectAccount); reconnect.Options.Add(reconnectRedirect);
         reconnect.SetAction((result, token) => ExecuteAsync(async () =>
         {
+            var parsedRedirect = ParseRedirectUri(result.GetValue(reconnectRedirect));
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var session = await runtime.Accounts.BeginReconnectAsync(result.GetValue(reconnectAccount), result.GetValue(reconnectRedirect)!, token);
+            var session = await runtime.Accounts.BeginReconnectAsync(result.GetValue(reconnectAccount), parsedRedirect, token);
             var callback = await ReceiveOAuthCallbackAsync(session, token);
             return await runtime.Accounts.CompleteConnectAsync(session, callback.Code, callback.State, token);
         }));
@@ -359,6 +361,13 @@ public static class CliApplication
             return new { accountId = id, status = "Disconnected", historyPreserved = true, queuedJobsPreserved = true };
         }));
         return command;
+    }
+
+    private static Uri ParseRedirectUri(string? rawRedirect)
+    {
+        if (!Uri.TryCreate(rawRedirect, UriKind.Absolute, out var redirectUri))
+            throw new ArgumentException("--redirect-uri must be an absolute URI.");
+        return redirectUri;
     }
 
     private static async Task<(string Code, string State)> ReceiveOAuthCallbackAsync(AuthorizationSession session, CancellationToken cancellationToken)

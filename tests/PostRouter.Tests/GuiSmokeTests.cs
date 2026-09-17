@@ -151,6 +151,19 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain("refreshToken", body, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task OAuth_callback_with_unknown_state_does_not_echo_authorization_code()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+
+        using var response = await setup.Client.GetAsync("/oauth/callback?state=unknown&code=authorization-code-secret");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("<code>connection_failed</code>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("authorization-code-secret", html, StringComparison.Ordinal);
+    }
+
     private static CanonicalPostIntent FakeIntent(Guid accountId, string key, string text) => new(
         key, new Content(Guid.NewGuid(), ContentKind.TextOnly, text, null, []),
         [new TargetIntent(accountId, "fake", "public", "fake-options/v1", 1, "{}", "fake-gui")],
