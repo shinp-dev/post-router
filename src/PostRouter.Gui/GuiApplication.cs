@@ -140,6 +140,25 @@ public static class GuiApplication
         app.MapGet("/api/dashboard", async (CancellationToken token) => Results.Json(await runtime.Operations.DashboardAsync(token).ConfigureAwait(false)));
         app.MapGet("/api/providers", () => Results.Json(runtime.Operations.Capabilities()));
         app.MapGet("/api/accounts", async (CancellationToken token) => Results.Json(await runtime.Operations.AccountsAsync(token).ConfigureAwait(false)));
+        app.MapGet("/api/media/settings", async (CancellationToken token) =>
+            Results.Json(await runtime.GitHubMedia.StatusAsync(token).ConfigureAwait(false)
+                ?? new GitHubMediaConfigurationStatus("", "", "", false)));
+        app.MapPost("/api/media/settings", async (MediaSettingsRequest request, CancellationToken token) =>
+            Results.Json(await runtime.GitHubMedia.ConfigureAsync(request.Owner, request.Repository, request.ReleaseTag, token).ConfigureAwait(false)));
+        app.MapPost("/api/media/credential", async (MediaCredentialRequest request, CancellationToken token) =>
+        {
+            var bytes = Encoding.UTF8.GetBytes(request.Token);
+            try { return Results.Json(await runtime.GitHubMedia.SetCredentialAsync(bytes, token).ConfigureAwait(false)); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        });
+        app.MapPost("/api/media/credential/clear", async (CancellationToken token) =>
+            Results.Json(await runtime.GitHubMedia.ClearCredentialAsync(token).ConfigureAwait(false)));
+        app.MapPost("/api/media/check", async (CancellationToken token) =>
+        {
+            using var host = await runtime.CreateGitHubMediaHostAsync(token).ConfigureAwait(false);
+            await host.CheckConnectionAsync(token).ConfigureAwait(false);
+            return Results.Json(new { reachable = true });
+        });
         app.MapGet("/api/publications", async (int? limit, CancellationToken token) =>
             Results.Json(await runtime.Operations.PublicationsAsync(limit ?? 200, token).ConfigureAwait(false)));
         app.MapGet("/api/publications/{publicationId:guid}", async (Guid publicationId, CancellationToken token) =>
@@ -388,6 +407,8 @@ public static class GuiApplication
         KeyNotFoundException => (StatusCodes.Status404NotFound, "not_found", "The requested item was not found."),
         NotSupportedException => (StatusCodes.Status422UnprocessableEntity, "unsupported", "The selected provider does not support this operation."),
         ProviderOperationException provider => (provider.Retryable ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status422UnprocessableEntity, provider.SafeCode, "The provider rejected or could not complete the operation."),
+        TemporaryPublicMediaException media when IsSafeErrorCode(media.Code) =>
+            (StatusCodes.Status422UnprocessableEntity, media.Code, "The GitHub media operation could not be completed."),
         InvalidOperationException => (StatusCodes.Status409Conflict, "invalid_state", "The operation is not allowed in the current state."),
         UnauthorizedAccessException => (StatusCodes.Status403Forbidden, "access_denied", "The operation is not permitted."),
         IOException => (StatusCodes.Status503ServiceUnavailable, "local_io_failure", "A required local operation failed."),
@@ -425,6 +446,11 @@ public static class GuiApplication
     private sealed record ReconnectRequest(string? ClientSecret)
     {
         public override string ToString() => "[REDACTED RECONNECT REQUEST]";
+    }
+    private sealed record MediaSettingsRequest(string Owner, string Repository, string ReleaseTag);
+    private sealed record MediaCredentialRequest(string Token)
+    {
+        public override string ToString() => "[REDACTED GITHUB MEDIA CREDENTIAL]";
     }
     private sealed record GuiError(string Code, string Message);
 }

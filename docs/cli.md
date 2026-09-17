@@ -37,6 +37,8 @@
 
 Phase 2Aの実装名は、上表の将来alias UXより安全なID指定を優先して、`account connect x --client-id ... --redirect-uri ... --alias ...`、`account status/disconnect/reset/revoke/reconnect --account UUID`とする。disconnect/resetはlocal tokenだけを削除し、revokeはX公式revokeを試みた後、成否を明示してlocal tokenを必ず削除する。reconnectは保存済みremote subjectと一致しなければ拒否する。
 
+GitHub一時公開メディアの現行CLIは `media configure --owner OWNER --repository REPO --tag TAG`、`media credential set`（非表示入力）、`media credential set --token-stdin`、`media credential clear`、`media status`、`media check`。`check` はpublic repositoryとpublished Releaseをread-onlyで確認し、素材をuploadしない。PATを引数で渡すoption、素材のstage/recover/deleteコマンドはまだ提供しない。PATはvaultに保存し、JSON結果には登録有無だけを出す。
+
 ## 共通投稿入力
 
 `--text` またはUTF-8 `--text-file`、`--image`（複数指定可）、`--video`（1本）、`--title`、`--to`、`--visibility`、`--at`、`--tz`、`--options-file`、`--idempotency-key`。imagesとvideoを同時指定する混在投稿はMVPで拒否する。音声のみ、thread、carouselは将来拡張。

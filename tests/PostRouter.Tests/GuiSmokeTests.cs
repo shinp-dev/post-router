@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using PostRouter.Application;
 using PostRouter.Domain;
 using PostRouter.Gui;
@@ -12,6 +13,76 @@ namespace PostRouter.Tests;
 
 public sealed class GuiSmokeTests
 {
+    [Fact]
+    public async Task GitHub_media_settings_keep_pat_in_vault_and_never_return_it_to_browser()
+    {
+        const string pat = "github-test-pat-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        var html = await setup.Client.GetStringAsync("/");
+        var script = await setup.Client.GetStringAsync("/app.js");
+        Assert.Contains("GitHub一時公開メディア", html, StringComparison.Ordinal);
+        Assert.Contains("type=\"password\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("localStorage", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionStorage", script, StringComparison.Ordinal);
+
+        using var initial = await setup.Client.GetAsync("/api/media/settings");
+        Assert.Contains("\"credentialConfigured\":false", await initial.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var csrfRejected = await setup.Client.PostAsJsonAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging"
+        });
+        Assert.Equal(HttpStatusCode.Forbidden, csrfRejected.StatusCode);
+
+        using var configured = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging"
+        });
+        Assert.Equal(HttpStatusCode.OK, configured.StatusCode);
+        using var invalidCredential = await setup.PostAsync("/api/media/credential", new { token = pat + " invalid" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidCredential.StatusCode);
+        Assert.DoesNotContain(pat, await invalidCredential.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var registered = await setup.PostAsync("/api/media/credential", new { token = pat });
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        Assert.DoesNotContain(pat, await registered.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var status = await setup.Client.GetStringAsync("/api/media/settings");
+        Assert.Contains("\"credentialConfigured\":true", status, StringComparison.Ordinal);
+        Assert.DoesNotContain(pat, status, StringComparison.Ordinal);
+        Assert.DoesNotContain("credentialBlobId", status, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(pat, await File.ReadAllTextAsync(Path.Combine(setup.Directory, "github-media-settings.json")), StringComparison.Ordinal);
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(setup.Directory, "post-router.db"),
+            Mode = SqliteOpenMode.ReadOnly
+        }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT ciphertext FROM vault_blobs WHERE purpose='github-media-staging-token'";
+            var ciphertext = (byte[])(await command.ExecuteScalarAsync())!;
+            Assert.False(ciphertext.AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(pat)));
+        }
+
+        using var retagged = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging-2"
+        });
+        Assert.Contains("\"credentialConfigured\":true", await retagged.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var changed = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "other",
+            releaseTag = "staging"
+        });
+        Assert.Contains("\"credentialConfigured\":false", await changed.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Gui_starts_and_serves_dashboard_create_list_detail_and_unknown_state()
     {

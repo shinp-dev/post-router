@@ -11,6 +11,27 @@ namespace PostRouter.Tests;
 
 public sealed class GitHubReleaseMediaHostTests
 {
+    [Fact]
+    public async Task Connection_check_reads_release_without_uploading_media()
+    {
+        using var setup = new Setup();
+        await setup.Host.CheckConnectionAsync();
+        Assert.Equal(0, setup.Server.UploadCalls);
+        Assert.Equal(2, setup.Server.Hosts.Count);
+        Assert.All(setup.Server.Hosts, host => Assert.Equal("api.github.com", host));
+        Assert.True(setup.Server.AllAuthenticated);
+    }
+
+    [Fact]
+    public async Task Connection_check_rejects_private_repository_without_upload()
+    {
+        using var setup = new Setup();
+        setup.Server.PrivateRepository = true;
+        var error = await Assert.ThrowsAsync<TemporaryPublicMediaException>(() => setup.Host.CheckConnectionAsync());
+        Assert.Equal("github_repository_not_public", error.Code);
+        Assert.Equal(0, setup.Server.UploadCalls);
+    }
+
     [Theory]
     [InlineData("video/mp4", ".mp4")]
     [InlineData("image/jpeg", ".jpg")]
@@ -390,6 +411,7 @@ public sealed class GitHubReleaseMediaHostTests
         public bool TimeoutBeforeStore { get; set; }
         public bool TimeoutAfterStore { get; set; }
         public bool RateLimit { get; set; }
+        public bool PrivateRepository { get; set; }
         public bool ReleaseThrowsDiagnostic { get; set; }
         public HttpStatusCode? ReleaseError { get; set; }
         public HttpStatusCode? UploadError { get; set; }
@@ -408,6 +430,12 @@ public sealed class GitHubReleaseMediaHostTests
             Methods.Add((request.Method, uri.AbsolutePath));
             AllAuthenticated &= request.Headers.Authorization?.Scheme == "Bearer"
                 && request.Headers.Authorization.Parameter == "fixture-token";
+            if (uri.Host == "api.github.com" && uri.AbsolutePath == "/repos/example/media")
+                return Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
+                {
+                    full_name = "example/media",
+                    @private = PrivateRepository
+                }));
             if (uri.Host == "api.github.com" && uri.AbsolutePath.EndsWith("/releases/tags/staging", StringComparison.Ordinal))
             {
                 if (ReleaseThrowsDiagnostic) throw new HttpRequestException("fixture-token secret-provider-body");

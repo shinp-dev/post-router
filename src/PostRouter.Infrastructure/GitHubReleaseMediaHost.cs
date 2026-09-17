@@ -20,7 +20,7 @@ public interface IGitHubMediaTokenSource
 
 public sealed class VaultGitHubMediaTokenSource(IVault vault, string blobId) : IGitHubMediaTokenSource
 {
-    public const string Purpose = "github-media-staging-token";
+    public const string Purpose = GitHubMediaConfigurationService.CredentialPurpose;
 
     public Task<byte[]> GetTokenAsync(CancellationToken cancellationToken = default) =>
         vault.GetAsync(blobId, Purpose, cancellationToken);
@@ -56,6 +56,24 @@ public sealed class GitHubReleaseMediaHost : ITemporaryPublicMediaHost, IDisposa
     // HTTP client replacement is internal and used only by tests with fake handlers.
     public static GitHubReleaseMediaHost CreateProduction(GitHubReleaseMediaHostOptions options, IGitHubMediaTokenSource tokens) =>
         new(options, tokens, NewClient(), NewClient(), TimeProvider.System, true);
+
+    public async Task CheckConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        var path = $"repos/{_options.Owner}/{_options.Repository}";
+        using (var request = NewRequest(HttpMethod.Get, new Uri(ApiRoot, path)))
+        using (var response = await SendAsync(_api, request, cancellationToken).ConfigureAwait(false))
+        {
+            if (response.StatusCode != HttpStatusCode.OK) throw Failure(response);
+            using var document = await ReadJsonAsync(response, cancellationToken).ConfigureAwait(false);
+            var repository = document.RootElement;
+            if (Text(repository, "full_name") is not { } name
+                || !string.Equals(name, $"{_options.Owner}/{_options.Repository}", StringComparison.OrdinalIgnoreCase)
+                || !repository.TryGetProperty("private", out var privateProperty)
+                || privateProperty.ValueKind != JsonValueKind.False)
+                throw Safe("github_repository_not_public");
+        }
+        _ = await GetReleaseIdAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     internal GitHubReleaseMediaHost(GitHubReleaseMediaHostOptions options, IGitHubMediaTokenSource tokens,
         HttpClient api, HttpClient upload, TimeProvider time)

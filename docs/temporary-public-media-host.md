@@ -4,7 +4,7 @@
 
 ## 公開境界
 
-**Stageした素材はDeleteするまでインターネットから取得可能になる。** `ExpiresAt` は論理期限であり、GitHubが期限に自動削除するわけではない。呼び出し側は必要な期間だけ公開し、取得完了や失敗確定後に `DeleteAsync` を呼ぶ。今回、期限監視やbackground cleanupは実装しない。spool全体の自動公開、一覧公開、GUI操作、Instagram連携も行わない。
+**Stageした素材はDeleteするまでインターネットから取得可能になる。** `ExpiresAt` は論理期限であり、GitHubが期限に自動削除するわけではない。呼び出し側は必要な期間だけ公開し、取得完了や失敗確定後に `DeleteAsync` を呼ぶ。今回、期限監視やbackground cleanupは実装しない。spool全体の自動公開、一覧公開、GUIからのstage/recover/delete、Instagram連携も行わない。
 
 public URLには元ファイル名、ローカルpath、投稿ID、SHA-256、tokenを含めない。asset名は呼び出しごとに生成するランダムなGUIDと、MIMEから決めた `.mp4` または `.jpg` のみ。public URLとopaque handleは秘密情報ではないが、公開URLを知る人は素材へアクセスできるので取り扱いには注意する。
 
@@ -22,6 +22,8 @@ GitHubへのmediaはRelease Asset APIで送信し、通常のgit commitやGitHub
 
 ## Credentialと利用条件
 
-GitHub tokenは`IGitHubMediaTokenSource`からリクエスト時だけ取得する。既存の暗号化 `IVault` を使う場合は、tokenをpurpose `github-media-staging-token` で格納し、そのblob IDを `VaultGitHubMediaTokenSource` に渡す。tokenそのものをコード、設定ファイル、DB平文、URL、ログ、例外へ書かない。最低限、対象repositoryのContents write権限を持つGitHub tokenが必要。public repositoryとpublished Releaseは利用者が事前に用意する。今回GUI/CLIでのtoken登録や実GitHubへのlive acceptanceは対象外。
+GitHub tokenは`IGitHubMediaTokenSource`からリクエスト時だけ取得する。既存の暗号化 `IVault` にpurpose `github-media-staging-token` で格納し、そのblob IDだけを設定ファイルに保存する。tokenそのものをコード、設定ファイル、DB平文、URL、ログ、例外へ書かない。最低限、対象repositoryのContents write権限を持つGitHub tokenが必要。public repositoryとpublished Releaseは利用者が事前に用意する。実GitHubへのlive acceptanceは未実施。
+
+CLIでは `pub media configure --owner OWNER --repository REPO --tag TAG` で公開先を設定し、`pub media credential set` の非表示プロンプト、または `pub media credential set --token-stdin` でPATをvaultに登録する。PATをprocess引数に直接渡すoptionはない。`pub media status` は設定とPAT登録有無だけを返し、`pub media check` は公開済みReleaseへのアクセスをread-onlyで確認する。`pub media credential clear` でPATを削除できる。GUIでは「設定」画面から同じ登録・削除・接続確認を行う。GUIはPATを再表示せず、browser storageにも保存しない。ownerかrepositoryを変更すると以前のPATは削除される。
 
 GitHubはupload失敗時に `starter` 状態の空assetを残す場合がある。正常な `uploaded` asset以外は回復成功とせず、自動削除や再uploadもしない。利用者がGitHub側の状態を確認してから処理する。[GitHub公式のupload注意事項](https://docs.github.com/en/rest/releases/assets#upload-a-release-asset)

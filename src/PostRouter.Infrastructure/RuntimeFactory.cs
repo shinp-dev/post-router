@@ -21,6 +21,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     {
         DataDirectory = dataDirectory;
         Store = store;
+        GitHubMedia = new GitHubMediaConfigurationService(new FileGitHubMediaConfigurationStore(dataDirectory), store);
         FakeProvider = fakeProvider;
         MaintenanceGate = maintenanceGate;
         _protector = protector;
@@ -58,6 +59,18 @@ public sealed class PostRouterRuntime : IAsyncDisposable
 
     public string DataDirectory { get; }
     public SqliteStore Store { get; }
+    public GitHubMediaConfigurationService GitHubMedia { get; }
+
+    public async Task<GitHubReleaseMediaHost> CreateGitHubMediaHostAsync(CancellationToken cancellationToken = default)
+    {
+        var settings = await new FileGitHubMediaConfigurationStore(DataDirectory).ReadAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("github_media_settings_missing");
+        if (settings.CredentialBlobId is null)
+            throw new InvalidOperationException("github_media_credential_missing");
+        return GitHubReleaseMediaHost.CreateProduction(
+            new GitHubReleaseMediaHostOptions(settings.Owner, settings.Repository, settings.ReleaseTag),
+            new VaultGitHubMediaTokenSource(Store, settings.CredentialBlobId));
+    }
     public PublicationApprovalStore Approvals { get; }
     public FakeProvider FakeProvider { get; }
     public FileMaintenanceGate MaintenanceGate { get; }

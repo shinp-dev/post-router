@@ -56,6 +56,16 @@ async function refreshAll() {
   } catch (error) { showNotice(error.message, true); }
 }
 
+async function refreshMediaSettings() {
+  const settings = await request("/api/media/settings");
+  byId("media-owner").value = settings?.owner || "";
+  byId("media-repository").value = settings?.repository || "";
+  byId("media-tag").value = settings?.releaseTag || "";
+  byId("media-credential-status").textContent = settings?.credentialConfigured ? "PAT登録済み" : "PAT未登録";
+  byId("media-clear").disabled = !settings?.credentialConfigured;
+  byId("media-check").disabled = !settings?.credentialConfigured;
+}
+
 function renderDashboard(data) {
   const labels = [
     ["Scheduled", data.scheduled, ""], ["Pending", data.pending, ""], ["Processing", data.processing, ""],
@@ -261,7 +271,10 @@ function confirmAction(title, message, action) {
   ok.onclick = async () => { dialog.close(); await action(); }; dialog.showModal();
 }
 
-document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => showView(button.dataset.view)));
+document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => {
+  showView(button.dataset.view);
+  if (button.dataset.view === "settings") refreshMediaSettings().catch(error => showNotice(error.message, true));
+}));
 document.querySelectorAll(".refresh").forEach(button => button.addEventListener("click", refreshAll));
 byId("detail-close").addEventListener("click", () => byId("detail-dialog").close());
 byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").close());
@@ -270,6 +283,37 @@ byId("post-text").addEventListener("input", event => { byId("text-count").textCo
 byId("post-account").addEventListener("change", updatePostCapability);
 byId("hide-published").addEventListener("change", () => renderPublications(publicationItems));
 byId("connect-provider").addEventListener("change", updateClientSecretField);
+byId("media-settings-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await request("/api/media/settings", { method: "POST", body: JSON.stringify({
+      owner: byId("media-owner").value.trim(), repository: byId("media-repository").value.trim(),
+      releaseTag: byId("media-tag").value.trim() }) });
+    await refreshMediaSettings(); showNotice("公開先を保存しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+byId("media-credential-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = byId("media-token");
+  const body = JSON.stringify({ token: input.value });
+  input.value = "";
+  try {
+    await request("/api/media/credential", { method: "POST", body });
+    await refreshMediaSettings(); showNotice("PATをvaultへ登録しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+byId("media-clear").addEventListener("click", () => confirmAction("PATを削除", "ローカルのGitHub PATを削除します。", async () => {
+  try {
+    await request("/api/media/credential/clear", { method: "POST", body: "{}" });
+    await refreshMediaSettings(); showNotice("PATを削除しました。");
+  } catch (error) { showNotice(error.message, true); }
+}));
+byId("media-check").addEventListener("click", async () => {
+  try {
+    await request("/api/media/check", { method: "POST", body: "{}" });
+    showNotice("公開先Releaseへの接続を確認しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
 byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret-file").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
 byId("reconnect-form").addEventListener("submit", event => {
   event.preventDefault();
@@ -343,6 +387,6 @@ byId("connect-form").addEventListener("submit", async event => {
 });
 
 (async () => {
-  try { csrfToken = (await request("/api/session")).csrfToken; await refreshAll(); window.setInterval(refreshAll, 10000); }
+  try { csrfToken = (await request("/api/session")).csrfToken; await refreshAll(); await refreshMediaSettings(); window.setInterval(refreshAll, 10000); }
   catch (error) { showNotice(error.message, true); }
 })();

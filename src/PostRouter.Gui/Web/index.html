@@ -15,6 +15,7 @@
       <button class="nav" data-view="compose">投稿作成</button>
       <button class="nav" data-view="publications">投稿一覧</button>
       <button class="nav" data-view="accounts">アカウント</button>
+      <button class="nav" data-view="settings">設定</button>
     </nav>
   </header>
   <main>
@@ -64,6 +65,27 @@
         <p class="wide hint">認証画面は別タブで開きます。client secret fileは1行のUTF-8テキスト、またはGoogle Desktop OAuthのinstalled JSONです。tokenやclient secretはブラウザへ保存しません。</p>
       </form>
       <div id="account-list" class="cards"></div>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="heading"><div><p class="eyebrow">Settings</p><h1>GitHub一時公開メディア</h1></div></div>
+      <p class="hint">stagingした素材はGitHub Releaseから誰でもアクセスできます。公開先と認証情報を登録し、接続を確認します。</p>
+      <form id="media-settings-form" class="panel form-grid">
+        <h2 class="wide">公開先Release</h2>
+        <label>Owner<input id="media-owner" required maxlength="100" autocomplete="off"></label>
+        <label>Repository<input id="media-repository" required maxlength="100" autocomplete="off"></label>
+        <label class="wide">Release tag<input id="media-tag" required maxlength="100" autocomplete="off"></label>
+        <p class="wide hint">OwnerまたはRepositoryを変更すると、保存済みPATは削除されます。</p>
+        <div class="wide actions"><button type="submit">公開先を保存</button></div>
+      </form>
+      <form id="media-credential-form" class="panel form-grid">
+        <h2 class="wide">Fine-grained PAT</h2>
+        <p id="media-credential-status" class="wide">未設定</p>
+        <label class="wide">PAT<input id="media-token" type="password" required maxlength="1024" autocomplete="off" spellcheck="false"></label>
+        <p class="wide hint">PATはローカルのcredential vaultに暗号化して保存します。ここには再表示されません。</p>
+        <div class="wide actions"><button id="media-clear" type="button" class="secondary">PATを削除</button><button type="submit">PATを登録・更新</button></div>
+      </form>
+      <div class="panel"><h2>接続確認</h2><p class="hint">設定したReleaseへのアクセスを確認します。素材のアップロードは行いません。</p><button id="media-check" type="button">接続を確認</button></div>
     </section>
 
     <dialog id="reconnect-dialog">
