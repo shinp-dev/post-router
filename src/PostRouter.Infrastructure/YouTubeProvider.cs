@@ -671,7 +671,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
             return Task.FromResult(Step(input, "poll-processing", StepEffect.ReadOnly, ReplaySafety.SafeRead, state));
 
         if (string.Equals(input.Target.Visibility, "private", StringComparison.Ordinal))
-            return Task.FromResult(Step(input, "finish-private", StepEffect.ReadOnly, ReplaySafety.SafeRead, state));
+            return Task.FromResult(Step(input, "finish-private", StepEffect.ConfirmPrivate, ReplaySafety.SafeRead, state));
 
         if (state.Status is null || state.StatusCheckedAt is null ||
             state.StatusCheckedAt.Value.Add(PublishSnapshotLifetime) <= timeProvider.GetUtcNow())
@@ -705,8 +705,7 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 "upload" => await UploadAsync(plan, token.AccessToken, cancellationToken).ConfigureAwait(false),
                 "poll-processing" => await ObserveAsync(plan, token.AccessToken, cancellationToken).ConfigureAwait(false),
                 "refresh-status" => await RefreshStatusAsync(plan, token.AccessToken, cancellationToken).ConfigureAwait(false),
-                "finish-private" => new(StepOutcome.Completed, EffectCertainty.Confirmed, plan.Checkpoint.VideoId,
-                    Checkpoint: JsonSerializer.Serialize(plan.Checkpoint), ObservedState: PublicationState.Published),
+                "finish-private" => await FinishPrivateAsync(plan, token.AccessToken, cancellationToken).ConfigureAwait(false),
                 "publish" => await PublishAsync(plan, token.AccessToken, cancellationToken).ConfigureAwait(false),
                 _ => Reject("youtube_plan_operation_unknown", FailureCategory.InvalidInput),
             };
@@ -731,7 +730,11 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         try
         {
             var observed = await client.GetVideoAsync(token.AccessToken, state.VideoId, cancellationToken).ConfigureAwait(false);
-            if (string.Equals(observed.Status.PrivacyStatus, input.Target.Visibility, StringComparison.Ordinal))
+            if (string.Equals(input.Target.Visibility, "private", StringComparison.Ordinal) &&
+                (observed.Status.PrivacyStatus is not "private" || observed.Status.PublishAt is not null))
+                return Reject("youtube_private_state_changed", FailureCategory.Provider, PublicationState.NeedsAttention);
+            if (string.Equals(observed.Status.PrivacyStatus, input.Target.Visibility, StringComparison.Ordinal) &&
+                (!string.Equals(input.Target.Visibility, "private", StringComparison.Ordinal) || IsConfirmedPrivate(observed)))
                 return new(StepOutcome.Completed, EffectCertainty.Confirmed, state.VideoId, Checkpoint: checkpoint,
                     ObservedState: PublicationState.Published);
             return new(StepOutcome.Pending, EffectCertainty.NoSideEffect, Checkpoint: checkpoint,
@@ -781,7 +784,9 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 NeedsStatusQuery = false,
                 Stage = "processing",
             };
-            return Continue(next, JobKind.Poll, timeProvider.GetUtcNow(), PublicationState.Processing);
+            return Continue(next, JobKind.Poll, timeProvider.GetUtcNow(), PublicationState.Processing)
+                with
+            { RemoteObjectId = result.VideoId };
         }
         if (result.SessionExpired)
         {
@@ -868,6 +873,24 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
                 SafeError: result.SafeError, RetryAt: result.RetryAt, FailureCategory: Classify(result.SafeError));
         return Reject(result.SafeError ?? "youtube_publish_rejected", Classify(result.SafeError), AttentionState(result.SafeError));
     }
+
+    private async Task<StepResult> FinishPrivateAsync(YouTubePlan plan, string token, CancellationToken cancellationToken)
+    {
+        var observed = await client.GetVideoAsync(token, plan.Checkpoint.VideoId!, cancellationToken).ConfigureAwait(false);
+        if (observed.Status.PrivacyStatus is not "private" || observed.Status.PublishAt is not null)
+            return Reject("youtube_private_state_changed", FailureCategory.Provider, PublicationState.NeedsAttention);
+        if (!IsConfirmedPrivate(observed))
+        {
+            var processing = plan.Checkpoint with { Stage = "processing", Status = null, StatusCheckedAt = null };
+            return Continue(processing, JobKind.Poll, timeProvider.GetUtcNow().AddSeconds(30), PublicationState.Processing);
+        }
+        return new(StepOutcome.Completed, EffectCertainty.Confirmed, plan.Checkpoint.VideoId,
+            Checkpoint: JsonSerializer.Serialize(plan.Checkpoint), ObservedState: PublicationState.Published);
+    }
+
+    private static bool IsConfirmedPrivate(YouTubeVideoObservation observation) =>
+        observation.Status.PrivacyStatus is "private" && observation.Status.PublishAt is null &&
+        observation.Status.UploadStatus is "processed" && observation.ProcessingDetails?.ProcessingStatus is "succeeded";
 
     private ProviderStep Step(ProviderPublication input, string operation, StepEffect effect, ReplaySafety replay, YouTubeCheckpoint state)
     {

@@ -37,6 +37,8 @@ public static class GuiApplication
     private const int MaximumJsonRequestBodyBytes = 64 * 1024;
     private const long MaximumImageRequestBodyBytes = 21L * 1024 * 1024;
     private const long MaximumImageBytes = 5L * 1024 * 1024;
+    private const long MaximumVideoBytes = 8L * 1024 * 1024 * 1024;
+    private const long MaximumVideoRequestBodyBytes = MaximumVideoBytes + 1024 * 1024;
     private static readonly string[] AssetNames = ["index.html", "app.css", "app.js"];
     private static readonly HashSet<string> OAuthStateErrorCodes = new(StringComparer.Ordinal)
     {
@@ -60,10 +62,14 @@ public static class GuiApplication
             });
             builder.Logging.ClearProviders();
             builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-            builder.Services.Configure<FormOptions>(form => form.MultipartBodyLengthLimit = MaximumImageRequestBodyBytes);
+            builder.Services.Configure<FormOptions>(form =>
+            {
+                form.MultipartBodyLengthLimit = MaximumVideoRequestBodyBytes;
+                form.ValueLengthLimit = MaximumJsonRequestBodyBytes;
+            });
             builder.WebHost.ConfigureKestrel(server =>
             {
-                server.Limits.MaxRequestBodySize = MaximumImageRequestBodyBytes;
+                server.Limits.MaxRequestBodySize = MaximumVideoRequestBodyBytes;
                 server.AddServerHeader = false;
                 server.Listen(IPAddress.Loopback, options.Port);
             });
@@ -106,7 +112,11 @@ public static class GuiApplication
                 await context.Response.WriteAsJsonAsync(new GuiError("request_rejected", "The local request could not be verified."));
                 return;
             }
-            if (HttpMethods.IsPost(context.Request.Method) && !context.Request.Path.Equals(new PathString("/api/posts/images")) &&
+            var isMediaRequest = context.Request.Path.Equals(new PathString("/api/posts/images")) ||
+                context.Request.Path.Equals(new PathString("/api/posts/video"));
+            var isSecretFileRequest = context.Request.Path.Equals(new PathString("/api/accounts/connect/file")) ||
+                context.Request.Path.Value?.EndsWith("/reconnect/file", StringComparison.Ordinal) == true;
+            if (HttpMethods.IsPost(context.Request.Method) && !isMediaRequest && !isSecretFileRequest &&
                 context.Request.ContentLength > MaximumJsonRequestBodyBytes)
             {
                 context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
@@ -144,6 +154,7 @@ public static class GuiApplication
             Results.Json(await runtime.Operations.EnqueueTextAsync(request, token).ConfigureAwait(false)));
         app.MapPost("/api/posts/images", async (HttpRequest request, CancellationToken token) =>
         {
+            if (request.ContentLength > MaximumImageRequestBodyBytes) throw new BadHttpRequestException("Image request is too large.");
             var form = await request.ReadFormAsync(token).ConfigureAwait(false);
             if (!Guid.TryParse(form["accountId"], out var accountId)) throw new ArgumentException("Account ID is invalid.");
             var text = form["text"].ToString();
@@ -185,6 +196,34 @@ public static class GuiApplication
                     try { File.Delete(path); } catch (IOException) { }
             }
         });
+        app.MapPost("/api/posts/video", async (HttpRequest request, CancellationToken token) =>
+        {
+            if (request.ContentLength > MaximumVideoRequestBodyBytes) throw new BadHttpRequestException("Video request is too large.");
+            var form = await request.ReadFormAsync(token).ConfigureAwait(false);
+            if (!Guid.TryParse(form["accountId"], out var accountId)) throw new ArgumentException("Account ID is invalid.");
+            if (form.Files.Count != 1 || form.Files[0].Name != "video") throw new ArgumentException("One MP4 video is required.");
+            if (!bool.TryParse(form["madeForKids"], out var madeForKids)) throw new ArgumentException("Made for Kids must be selected.");
+            if (!bool.TryParse(form["containsSyntheticMedia"], out var synthetic)) throw new ArgumentException("Synthetic media selection is invalid.");
+            if (!bool.TryParse(form["uploadNoticeAcknowledged"], out var acknowledged) || !acknowledged)
+                throw new ArgumentException("YouTube upload notice must be acknowledged.");
+            var file = form.Files[0];
+            if (file.Length is <= 0 or > MaximumVideoBytes) throw new ArgumentException("Video size is outside the supported range.");
+            var incoming = Path.Combine(runtime.DataDirectory, "incoming");
+            Directory.CreateDirectory(incoming);
+            var path = Path.Combine(incoming, $"{Guid.NewGuid():N}.upload");
+            try
+            {
+                await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    1024 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                    await file.CopyToAsync(output, token).ConfigureAwait(false);
+                var asset = await runtime.Spool.ImportAsync(path, token).ConfigureAwait(false);
+                return Results.Json(await runtime.Operations.EnqueueVideoAsync(new(
+                    accountId, form["title"].ToString(), form["description"].ToString(), asset,
+                    madeForKids, synthetic, form["visibility"].ToString(), acknowledged,
+                    form["clientRequestId"].ToString()), token).ConfigureAwait(false));
+            }
+            finally { try { File.Delete(path); } catch (IOException) { } }
+        });
         app.MapPost("/api/posts/{postId:guid}/cancel", async (Guid postId, CancellationToken token) =>
         {
             var changed = await runtime.Operations.CancelAsync(postId, token).ConfigureAwait(false);
@@ -220,6 +259,17 @@ public static class GuiApplication
             authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), request.ClientSecret);
             return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
         });
+        app.MapPost("/api/accounts/connect/file", async (HttpContext context, CancellationToken token) =>
+        {
+            var form = await context.Request.ReadFormAsync(token).ConfigureAwait(false);
+            var clientSecret = await ReadClientSecretFileAsync(form.Files, token).ConfigureAwait(false);
+            var session = runtime.Accounts.BeginConnect(form["provider"].ToString(), form["clientId"].ToString(),
+                CallbackUri(context.Request), form["alias"].ToString());
+            if (session.Provider != "youtube") throw new ArgumentException("Client secret is supported only for YouTube.");
+            RemoveExpired(authorizations);
+            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), clientSecret);
+            return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
+        });
         app.MapPost("/api/accounts/{accountId:guid}/reconnect", async (Guid accountId, ReconnectRequest request, HttpContext context, CancellationToken token) =>
         {
             var session = await runtime.Accounts.BeginReconnectAsync(accountId, CallbackUri(context.Request), token).ConfigureAwait(false);
@@ -229,6 +279,16 @@ public static class GuiApplication
                 throw new ArgumentException("Client secret must not be blank.");
             RemoveExpired(authorizations);
             authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), request.ClientSecret);
+            return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
+        });
+        app.MapPost("/api/accounts/{accountId:guid}/reconnect/file", async (Guid accountId, HttpContext context, CancellationToken token) =>
+        {
+            var form = await context.Request.ReadFormAsync(token).ConfigureAwait(false);
+            var clientSecret = await ReadClientSecretFileAsync(form.Files, token).ConfigureAwait(false);
+            var session = await runtime.Accounts.BeginReconnectAsync(accountId, CallbackUri(context.Request), token).ConfigureAwait(false);
+            if (session.Provider != "youtube") throw new ArgumentException("Client secret is supported only for YouTube.");
+            RemoveExpired(authorizations);
+            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), clientSecret);
             return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
         });
         app.MapPost("/api/accounts/{accountId:guid}/disconnect", async (Guid accountId, CancellationToken token) =>
@@ -288,6 +348,14 @@ public static class GuiApplication
     }
 
     private static Uri CallbackUri(HttpRequest request) => new($"{request.Scheme}://{request.Host.Value}/oauth/callback");
+
+    private static async Task<string> ReadClientSecretFileAsync(IFormFileCollection files, CancellationToken cancellationToken)
+    {
+        if (files.Count != 1 || files[0].Name != "clientSecretFile")
+            throw new ArgumentException("One client secret file is required.");
+        await using var stream = files[0].OpenReadStream();
+        return await ClientSecretFile.ReadAsync(stream, files[0].Length, cancellationToken).ConfigureAwait(false);
+    }
 
     private static async Task<bool> IsJpegAsync(string path, CancellationToken cancellationToken)
     {

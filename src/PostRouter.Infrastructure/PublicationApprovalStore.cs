@@ -16,7 +16,7 @@ public sealed class PublicationApprovalStore(SqliteDatabase database) : IPublica
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
-        if (providerStep.Effect != StepEffect.MayPublish) return true;
+        if (providerStep.Effect is not (StepEffect.MayPublish or StepEffect.ConfirmPrivate)) return true;
 
         await using var connection = await database.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction();

@@ -57,7 +57,7 @@ Desktop App OAuth 2.0 + PKCE S256を使用する。
 - `channels.list(mine=true)`で得たYouTube channel IDをremote subjectとしてAccountへ保存
 - reconnect時は既存channel IDと一致した場合だけ再接続
 
-installed appはclient secretを安全に保持できない前提なので、client secret依存の設計にしない。
+installed appのclient secretはPKCEの代替にしない。Googleがtoken endpointで要求するDesktop clientでは、GUI/CLIのsecret fileから任意指定し、tokenとともに暗号化vaultへ保存してexchange・refresh・reconnectで利用する。authorization URL、ブラウザ保存領域、SQLite plaintextへは出さない。
 
 ### Upload policy metadata
 
@@ -75,7 +75,7 @@ YouTube targetは`youtube-options/v1`として以下を扱う。
 - `containsSyntheticMedia`: 任意boolean。指定時は`status.containsSyntheticMedia`へ送る。
 - `uploadNoticeAcknowledged`: upload noticeを確認した明示フラグとして必須true。Providerへは送らない。
 
-CLIだけではなく、runtimeに登録するYouTube Adapter自身も`madeForKids`の明示と`uploadNoticeAcknowledged=true`をinvariantとして検証する。将来GUI/automationからYouTube uploadを公開するときも、このProvider invariantを迂回せず、同等のhuman-facing noticeを入口に表示する。
+CLIとGUIの両入口にYouTube upload noticeを表示する。runtimeに登録するYouTube Adapter自身も`madeForKids`の明示と`uploadNoticeAcknowledged=true`をinvariantとして検証する。GUIは`POST /api/posts/video`のmultipartを一時ファイルから既存spoolへimportし、同じ`CanonicalPostIntent`と`PostService`へ渡す。GUIのvisibilityはprivateに限定する。
 
 ### Upload
 
@@ -87,7 +87,7 @@ CLIだけではなく、runtimeに登録するYouTube Adapter自身も`madeForKi
 6. network loss / process crash後も同じ「status query → remaining PUT」を再実行するため、古いlocal offsetをblind resendしない。
 7. `308`の`Retry-After`が未来時刻なら、そのworker turnではdata PUTへ進まず再実行時刻をdurableに返す。
 8. 曖昧なdata PUTが一度もないsessionの404は新sessionから再構築できる。曖昧なdata PUT後にsessionが失効した場合は、video IDなしで安全に照合できないため自動再uploadせず`NeedsAttention`へ止める。
-9. upload完了でvideo IDを取得し、必ずdurable checkpointしてからprocessing確認へ進む。
+9. upload完了でvideo IDを取得し、checkpointと`remote_objects`を同一transactionでdurable保存してからprocessing確認へ進む。`post status`とGUI詳細でもこのIDを確認できる。
 10. Xの通常API timeoutとYouTube大容量upload timeoutを分離し、YouTube uploadは12時間の独立timeoutを持つ。timeout/network interruption後もremote offsetからresumeする。
 11. Windows production runtimeではdata PUT中にspool fileのread/share-read handleを保持し、verifyから再openまでのpath replacement/write raceを狭める。SHA-256/size再検証は引き続きinner adapter側で行う。
 
@@ -125,7 +125,7 @@ Google API errorのraw message/bodyはGUI・safe errorへ露出しない。既�
 
 動画はupload時点ではprivateのままにする。
 
-`private` targetもprocessing成功だけでは完了させず、完了直前にremote statusを再取得して実際にprivateであることを確認する。外部操作でpublic/unlistedへ変わっていた場合は`NeedsAttention`へ止める。
+`private` targetもprocessing成功だけでは完了させず、完了直前に既知video IDでremote statusを再取得する。`privacyStatus=private`、processing成功、native `publishAt`なしを確認できたときだけ`ConfirmPrivate`境界から`Ready -> Published`を許す。video IDはupload時に保存されたIDと一致させる。外部操作でpublic/unlistedへ変わっていた場合や所有していないnative scheduleがあれば`NeedsAttention`へ止める。`RequireApproval`はこの境界でも`AwaitingApproval`に停止する。
 
 `public` / `unlisted` targetは公開直前にremote statusを再取得する。
 

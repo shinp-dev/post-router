@@ -37,7 +37,9 @@ pub post status <post-id>
 
 認証を外す場合は`account disconnect --account <id>`、X側も失効する場合は`account revoke --account <id>`。どちらも投稿履歴とqueueを削除しない。再接続は`account reconnect --account <id> --redirect-uri <registered-loopback-uri>`で、同じX user IDだけを許可する。詳細と検証状態は[Phase 2A X](docs/phase2a-x.md)を参照。
 
-YouTube Desktop OAuthでは、Googleが発行したclient secretを必要とする場合だけ指定できる。GUIのYouTube接続欄で入力するか、CLIではリポジトリ外のファイルを`--client-secret-file`で読む。secret自体をコマンド引数に書かない。接続成功後はtokenとともに暗号化vaultへ保存され、再接続とrefreshで再利用される。`disconnect`後はvaultのsecretも削除されるので、再接続時にGUIの入力欄またはCLIの同じオプションで再入力する。入力ファイルは接続成功後に削除できる。PKCE S256は引き続き使用する。[Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)
+YouTube Desktop OAuthでは、Googleが発行したclient secretを必要とする場合だけ指定できる。GUIではYouTube接続時に「Client secret file」を選び、CLIではリポジトリ外のファイルを`--client-secret-file`で読む。ファイルは1行のUTF-8 secretまたはGoogle Desktop OAuthのinstalled JSONに対応する。secret自体をコマンド引数に書かない。接続成功後はtokenとともに暗号化vaultへ保存され、再接続とrefreshで再利用される。`disconnect`後はvaultのsecretも削除されるので、再接続時に同じファイルを再指定する。入力ファイルは接続成功後に削除できる。PKCE S256は引き続き使用する。[Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)
+
+GUIから非公開YouTube動画を投稿するには、`pub gui`で接続済みYouTubeアカウントを選び、MP4、タイトル、Made for Kidsの明示選択、upload noticeの確認を入力してQueueへ登録する。説明と合成・改変メディアの指定もできる。公開設定は現在GUIでprivateに固定される。別processの`pub worker once`または`pub worker run`がuploadとprocessing確認を進める。upload完了時からvideo IDが`pub post status <post-id>`とGUI詳細に表示され、remoteのprivate状態を再確認した後にPost Router側も`Published`になる。
 
 ```powershell
 pub account connect youtube --client-id <desktop-client-id> --redirect-uri http://127.0.0.1:8765/callback --alias youtube-main --client-secret-file "C:\secure\youtube-client-secret.txt"
