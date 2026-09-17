@@ -248,7 +248,7 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         using var request = new HttpRequestMessage(HttpMethod.Post, TokenEndpoint) { Content = new FormUrlEncodedContent(fields) };
         using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
-            throw await MapFailureAsync(response, "youtube_token_rejected", cancellationToken).ConfigureAwait(false);
+            throw await MapTokenFailureAsync(response, cancellationToken).ConfigureAwait(false);
         var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -348,6 +348,40 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         var reason = await TryReadErrorReasonAsync(response, cancellationToken).ConfigureAwait(false);
         var mapping = MapSafeFailure(response.StatusCode, reason, fallback);
         return new(mapping.SafeCode, mapping.Retryable);
+    }
+
+    private static async Task<YouTubeProviderException> MapTokenFailureAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        var safeCode = "youtube_token_rejected";
+        byte[]? bytes = null;
+        try
+        {
+            bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+            using var document = JsonDocument.Parse(bytes);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+            {
+                safeCode = error.GetString() switch
+                {
+                    "invalid_grant" => "youtube_oauth_invalid_grant",
+                    "invalid_client" => "youtube_oauth_invalid_client",
+                    "unauthorized_client" => "youtube_oauth_unauthorized_client",
+                    "invalid_request" => "youtube_oauth_invalid_request",
+                    "unsupported_grant_type" => "youtube_oauth_unsupported_grant_type",
+                    _ => safeCode,
+                };
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or YouTubeProviderException) { }
+        finally
+        {
+            if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+        }
+        var retryable = safeCode == "youtube_token_rejected" &&
+            (response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500);
+        return new(safeCode, retryable);
     }
 
     private static YouTubeFailureMapping MapSafeFailure(HttpStatusCode status, string? reason, string fallback)
@@ -915,6 +949,8 @@ internal sealed class YouTubeProviderAdapter(AuthCoordinator auth, YouTubeApiCli
         "youtube_network_unavailable" or "youtube_temporary_unavailable" or "youtube_upload_session_expired" or
             "youtube_upload_response_uncertain" or "youtube_upload_no_progress" => FailureCategory.Network,
         "youtube_auth_or_scope_rejected" or "youtube_token_rejected" or "youtube_reconnect_required" or
+            "youtube_oauth_invalid_grant" or "youtube_oauth_invalid_client" or "youtube_oauth_unauthorized_client" or
+            "youtube_oauth_invalid_request" or "youtube_oauth_unsupported_grant_type" or
             "auth_required" or "credential_unavailable" => FailureCategory.Authentication,
         "youtube_invalid_input" or "media_integrity_mismatch" or "media_unavailable" or
             "youtube_upload_offset_invalid" or "youtube_checkpoint_invalid" => FailureCategory.InvalidInput,
