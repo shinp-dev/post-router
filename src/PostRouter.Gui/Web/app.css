@@ -34,6 +34,7 @@ h2 { font-size: 1.05rem; }
 label { display: grid; gap: 7px; font-weight: 650; color: #38475a; }
 label[hidden] { display: none; }
 label.choice { display: flex; align-items: flex-start; gap: .6rem; font-weight: 500; }
+label.choice[hidden] { display: none; }
 label.choice > span { min-width: 0; }
 input:not([type="checkbox"]), select, textarea { width: 100%; border: 1px solid #bfc9d4; border-radius: 8px; padding: .72rem; background: white; color: #17212b; }
 input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: .2em 0 0; }
