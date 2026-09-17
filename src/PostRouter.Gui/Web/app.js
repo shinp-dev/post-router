@@ -185,7 +185,7 @@ async function openDetail(id) {
     addDefinition(dl, "Publication", detail.summary.publicationState);
     addDefinition(dl, "Approval", approval.policy === "RequireApproval" ? (approval.approved ? "Approved" : "Required") : "Automatic");
     addDefinition(dl, "Queue", detail.summary.jobState ? `${detail.summary.jobKind} / ${detail.summary.jobState}` : "—");
-    addDefinition(dl, "Scheduled", formatTime(detail.summary.dueAt)); addDefinition(dl, "Attempts", detail.summary.attemptCount);
+    addDefinition(dl, "Scheduled", formatTime(detail.summary.dueAt)); addDefinition(dl, "実行ステップ数", detail.summary.attemptCount);
     addDefinition(dl, "Remote ID", detail.summary.remoteId || "—"); addDefinition(dl, "Provider error", detail.providerError || "—");
     addDefinition(dl, "Normalized error", detail.normalizedError || "—"); addDefinition(dl, "Reconcile queued", detail.reconcileQueued ? "Yes" : "No");
     addDefinition(dl, "Created", formatTime(detail.summary.createdAt)); addDefinition(dl, "Submitted", formatTime(detail.firstSubmittedAt));
