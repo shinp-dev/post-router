@@ -37,6 +37,12 @@ pub post status <post-id>
 
 認証を外す場合は`account disconnect --account <id>`、X側も失効する場合は`account revoke --account <id>`。どちらも投稿履歴とqueueを削除しない。再接続は`account reconnect --account <id> --redirect-uri <registered-loopback-uri>`で、同じX user IDだけを許可する。詳細と検証状態は[Phase 2A X](docs/phase2a-x.md)を参照。
 
+YouTube Desktop OAuthでは、Googleが発行したclient secretを必要とする場合だけ指定できる。GUIのYouTube接続欄で入力するか、CLIではリポジトリ外のファイルを`--client-secret-file`で読む。secret自体をコマンド引数に書かない。接続成功後はtokenとともに暗号化vaultへ保存され、再接続とrefreshで再利用される。`disconnect`後はvaultのsecretも削除されるので、再接続時にGUIの入力欄またはCLIの同じオプションで再入力する。入力ファイルは接続成功後に削除できる。PKCE S256は引き続き使用する。[Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)
+
+```powershell
+pub account connect youtube --client-id <desktop-client-id> --redirect-uri http://127.0.0.1:8765/callback --alias youtube-main --client-secret-file "C:\secure\youtube-client-secret.txt"
+```
+
 ## 設計上の結論
 
 C# / .NET 10 LTS、System.CommandLine、SQLiteを採用する。1つの実行ファイル `pub.exe` が通常CLIと `worker run` を提供し、Windowsタスクスケジューラから同じユーザーでworkerを起動する。単一workerとは、installationごとに実行調整を担うprocessを1つにする意味であり、1つのHTTP処理で全queueを直列に塞ぐ意味ではない。worker内では対象ごとの直列性を保ちながら、期限優先の小さな並行実行を行う。SNS別AdapterがAPI・認証・制限・メトリクス解釈を所有する。

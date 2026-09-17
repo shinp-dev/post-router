@@ -15,7 +15,7 @@ public sealed record StatsWrite(RawMetricInput Raw, MetricsSnapshot Snapshot);
 public sealed record AuthGrantRecord(
     Guid Id, string Provider, string Subject, long Generation, DateTimeOffset ExpiresAt,
     string VaultBlobId, string Status, Guid? AccountId = null, string? ClientId = null, string? Scope = null);
-public sealed record TokenMaterial(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt)
+public sealed record TokenMaterial(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt, string? ClientSecret = null)
 {
     public override string ToString() => "[REDACTED TOKEN MATERIAL]";
 }
@@ -162,7 +162,7 @@ public interface IAuthProvider
 public interface IInteractiveAuthProvider : IAuthProvider
 {
     AuthorizationSession BeginAuthorization(string clientId, Uri redirectUri, Guid? expectedAccountId = null, string? expectedSubject = null, string? requestedAlias = null);
-    Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken);
+    Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, string? clientSecret, CancellationToken cancellationToken);
     Task RevokeAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken);
 }
 

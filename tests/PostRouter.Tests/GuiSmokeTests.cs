@@ -134,6 +134,8 @@ public sealed class GuiSmokeTests
         Assert.Contains("Disconnected", await disconnect.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Contains(await setup.Runtime.Posts.QueueAsync(), item => item.OwnerId == Assert.Single(queued.PublicationIds));
         Assert.Equal(0, await setup.Runtime.Worker.RunOnceAsync());
+        using var reconnect = await setup.PostAsync($"/api/accounts/{account.AccountId:D}/reconnect", new { });
+        Assert.Equal(HttpStatusCode.OK, reconnect.StatusCode);
     }
 
     [Fact]
@@ -149,6 +151,67 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain("codeVerifier", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("accessToken", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("refreshToken", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task YouTube_connect_accepts_optional_secret_without_exposing_it_in_browser_response()
+    {
+        const string clientSecret = "gui-client-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+
+        using var response = await setup.PostAsync("/api/accounts/connect", new
+        {
+            provider = "youtube",
+            clientId = "desktop-client",
+            alias = "youtube-main",
+            clientSecret,
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("code_challenge_method=S256", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(clientSecret, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
+        var html = await setup.Client.GetStringAsync("/");
+        Assert.Contains("id=\"client-secret\" type=\"password\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain(clientSecret, html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task YouTube_reconnect_accepts_secret_after_local_credentials_are_removed()
+    {
+        const string clientSecret = "reconnect-client-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        var tokenBytes = JsonSerializer.SerializeToUtf8Bytes(new TokenMaterial("access", "refresh", DateTimeOffset.UtcNow.AddHours(1), clientSecret));
+        var blobId = await setup.Runtime.Store.PutAsync("auth-token", tokenBytes);
+        CryptographicOperations.ZeroMemory(tokenBytes);
+        var account = await setup.Runtime.Store.SaveConnectedAccountAsync(new(
+            "youtube", "youtube-main", "channel-123", "Channel Name", "desktop-client",
+            "https://www.googleapis.com/auth/youtube.force-ssl", DateTimeOffset.UtcNow.AddHours(1), blobId));
+        Assert.True(await setup.Runtime.Accounts.DisconnectAsync(account.AccountId));
+        await setup.StartGuiAsync();
+
+        using var response = await setup.PostAsync($"/api/accounts/{account.AccountId:D}/reconnect", new { clientSecret });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("authorizationUrl", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(clientSecret, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
+        var html = await setup.Client.GetStringAsync("/");
+        Assert.Contains("id=\"reconnect-client-secret\" type=\"password\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth_callback_with_unknown_state_does_not_echo_authorization_code()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+
+        using var response = await setup.Client.GetAsync("/oauth/callback?state=unknown&code=authorization-code-secret");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("<code>connection_failed</code>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("authorization-code-secret", html, StringComparison.Ordinal);
     }
 
     private static CanonicalPostIntent FakeIntent(Guid accountId, string key, string text) => new(

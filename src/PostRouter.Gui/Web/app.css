@@ -29,9 +29,10 @@ h2 { font-size: 1.05rem; }
 .alert-box { padding: 14px 16px; margin-bottom: 14px; border-radius: 9px; background: #fff2d7; border: 1px solid #e7bd64; }
 .alert-box.error { background: #fff0f0; border-color: #e4a3a3; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.form-grid.compact { grid-template-columns: 1fr 1.4fr 1.2fr auto; align-items: end; }
+.form-grid.compact { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
 .wide { grid-column: 1 / -1; }
 label { display: grid; gap: 7px; font-weight: 650; color: #38475a; }
+label[hidden] { display: none; }
 label.choice { display: flex; align-items: center; font-weight: 500; }
 input, select, textarea { width: 100%; border: 1px solid #bfc9d4; border-radius: 8px; padding: .72rem; background: white; color: #17212b; }
 textarea { resize: vertical; }

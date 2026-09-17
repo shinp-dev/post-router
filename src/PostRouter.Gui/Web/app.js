@@ -4,6 +4,7 @@ let csrfToken = "";
 let accounts = [];
 let providers = [];
 let pendingRequestId = crypto.randomUUID();
+let reconnectAccountId = null;
 
 const byId = id => document.getElementById(id);
 const escapeState = value => String(value || "Unknown").replace(/[^A-Za-z]/g, "");
@@ -78,8 +79,10 @@ function addAlert(parent, message, error) {
 }
 
 function renderProviders() {
-  const connect = byId("connect-provider"); connect.replaceChildren();
+  const connect = byId("connect-provider"); const selected = connect.value; connect.replaceChildren();
   providers.filter(item => item.interactiveAuthentication).forEach(item => connect.add(new Option(item.providerKey, item.providerKey)));
+  if ([...connect.options].some(item => item.value === selected)) connect.value = selected;
+  updateClientSecretField();
   const post = byId("post-account"); post.replaceChildren();
   accounts.filter(item => item.status === "Connected" || item.status === "Ready").forEach(item => {
     const capability = providers.find(provider => provider.providerKey === item.provider);
@@ -87,6 +90,12 @@ function renderProviders() {
   });
   if (!post.options.length) post.add(new Option("接続済みアカウントがありません", ""));
   updateImageCapability();
+}
+
+function updateClientSecretField() {
+  const enabled = byId("connect-provider").value === "youtube";
+  byId("client-secret-field").hidden = !enabled;
+  if (!enabled) byId("client-secret").value = "";
 }
 
 function updateImageCapability() {
@@ -189,9 +198,19 @@ async function accountAction(id, action) {
   catch (error) { showNotice(error.message, true); }
 }
 
-async function reconnect(id) {
+function reconnect(id) {
+  if (accounts.find(account => account.accountId === id)?.provider === "youtube") {
+    reconnectAccountId = id;
+    byId("reconnect-client-secret").value = "";
+    byId("reconnect-dialog").showModal();
+    return;
+  }
+  startReconnect(id, null);
+}
+
+async function startReconnect(id, clientSecret) {
   const popup = prepareAuthorizationWindow();
-  try { const result = await request(`/api/accounts/${id}/reconnect`, { method: "POST", body: "{}" }); if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。"); }
+  try { const result = await request(`/api/accounts/${id}/reconnect`, { method: "POST", body: JSON.stringify({ clientSecret }) }); if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。"); }
   catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
 }
 
@@ -220,6 +239,16 @@ byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").cl
 byId("schedule-enabled").addEventListener("change", event => { byId("schedule-field").hidden = !event.target.checked; byId("post-at").required = event.target.checked; });
 byId("post-text").addEventListener("input", event => { byId("text-count").textContent = `${[...event.target.value].length} / 280`; pendingRequestId = crypto.randomUUID(); });
 byId("post-account").addEventListener("change", updateImageCapability);
+byId("connect-provider").addEventListener("change", updateClientSecretField);
+byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
+byId("reconnect-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const id = reconnectAccountId;
+  const clientSecret = byId("reconnect-client-secret").value || null;
+  byId("reconnect-client-secret").value = "";
+  byId("reconnect-dialog").close(); reconnectAccountId = null;
+  if (id) startReconnect(id, clientSecret);
+});
 
 byId("post-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -248,8 +277,11 @@ byId("connect-form").addEventListener("submit", async event => {
   event.preventDefault();
   const popup = prepareAuthorizationWindow();
   try {
-    const body = { provider: byId("connect-provider").value, clientId: byId("client-id").value, alias: byId("account-alias").value || null };
-    const result = await request("/api/accounts/connect", { method: "POST", body: JSON.stringify(body) });
+    const body = { provider: byId("connect-provider").value, clientId: byId("client-id").value, alias: byId("account-alias").value || null,
+      clientSecret: byId("connect-provider").value === "youtube" ? byId("client-secret").value || null : null };
+    const payload = JSON.stringify(body);
+    byId("client-secret").value = "";
+    const result = await request("/api/accounts/connect", { method: "POST", body: payload });
     if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。完了後に更新してください。");
   } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
 });

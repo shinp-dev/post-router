@@ -26,8 +26,9 @@ internal sealed class YouTubeConsentAuthProvider(YouTubeAuthProvider inner) : II
         AuthorizationSession session,
         string code,
         string returnedState,
+        string? clientSecret,
         CancellationToken cancellationToken) =>
-        inner.CompleteAuthorizationAsync(session, code, returnedState, cancellationToken);
+        inner.CompleteAuthorizationAsync(session, code, returnedState, clientSecret, cancellationToken);
 
     public Task<RefreshResult> RefreshAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken) =>
         inner.RefreshAsync(grant, current, cancellationToken);

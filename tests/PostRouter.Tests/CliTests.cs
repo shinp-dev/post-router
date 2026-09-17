@@ -11,6 +11,66 @@ namespace PostRouter.Tests;
 public sealed class CliTests
 {
     [Fact]
+    public async Task Connect_accepts_absolute_loopback_redirect_before_provider_lookup()
+    {
+        var result = await InvokeConnectAsync("unregistered", "http://127.0.0.1:8765/callback");
+        Assert.NotEqual(0, result.ExitCode);
+        using var json = JsonDocument.Parse(result.Output);
+        Assert.Equal("unsupported", json.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Connect_rejects_malformed_redirect_as_invalid_input()
+    {
+        var result = await InvokeConnectAsync("youtube", "not-a-uri");
+        Assert.NotEqual(0, result.ExitCode);
+        using var json = JsonDocument.Parse(result.Output);
+        var error = json.RootElement.GetProperty("error");
+        Assert.Equal("invalid_input", error.GetProperty("code").GetString());
+        Assert.Equal("--redirect-uri must be an absolute URI.", error.GetProperty("message").GetString());
+    }
+
+    [Theory]
+    [InlineData("youtube", "YouTube Desktop OAuth redirect")]
+    [InlineData("x", "X Native App redirect URI")]
+    public async Task Connect_reaches_provider_redirect_validation(string provider, string expectedMessage)
+    {
+        var result = await InvokeConnectAsync(provider, "https://127.0.0.1:8765/callback");
+        Assert.NotEqual(0, result.ExitCode);
+        using var json = JsonDocument.Parse(result.Output);
+        var error = json.RootElement.GetProperty("error");
+        Assert.Equal("invalid_input", error.GetProperty("code").GetString());
+        Assert.Contains(expectedMessage, error.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Client_secret_file_is_accepted_without_echoing_secret_in_cli_json()
+    {
+        const string clientSecret = "cli-client-secret-marker";
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-secret-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var secretFile = Path.Combine(directory, "desktop-secret.txt");
+        await File.WriteAllTextAsync(secretFile, clientSecret);
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var result = await InvokeAsync(["--data-dir", directory, "account", "connect", "youtube", "--client-id", "desktop-client",
+                "--redirect-uri", "https://127.0.0.1:8765/callback", "--client-secret-file", secretFile]);
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.DoesNotContain(clientSecret, result.Output, StringComparison.Ordinal);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.Equal("invalid_input", json.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Manifest_enqueue_is_idempotent_and_worker_publishes()
     {
         var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-tests", Guid.NewGuid().ToString("N"));
@@ -138,5 +198,23 @@ public sealed class CliTests
             return (exit, output.ToString());
         }
         finally { Console.SetOut(original); }
+    }
+
+    private static async Task<(int ExitCode, string Output)> InvokeConnectAsync(string provider, string redirect)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-oauth-tests", Guid.NewGuid().ToString("N"));
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            return await InvokeAsync(["--data-dir", directory, "account", "connect", provider,
+                "--client-id", "test-client", "--redirect-uri", redirect]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
     }
 }
