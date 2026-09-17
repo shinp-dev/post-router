@@ -37,10 +37,10 @@
         <label id="title-field" class="wide" hidden>タイトル（100 Unicode文字以内）<input id="post-title"></label>
         <label id="description-field" class="wide" hidden>説明<textarea id="post-description" rows="5"></textarea></label>
         <label id="kids-field" hidden>Made for Kids<select id="post-made-for-kids"><option value="">選択してください</option><option value="true">はい</option><option value="false">いいえ</option></select></label>
-        <label id="synthetic-field" class="choice" hidden><input id="post-synthetic" type="checkbox"> 合成・改変されたメディアを含む</label>
+        <label id="synthetic-field" class="choice" hidden><input id="post-synthetic" type="checkbox"><span>合成・改変されたメディアを含む</span></label>
         <label id="visibility-field" hidden>公開設定<select id="post-visibility"><option value="private">非公開（private）</option></select></label>
-        <label id="upload-notice-field" class="wide choice" hidden><input id="post-upload-notice" type="checkbox"> YouTubeの利用規約・コミュニティガイドラインを守り、著作権とプライバシーの権利を尊重して投稿することを確認しました。 <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer">利用規約</a></label>
-        <label id="schedule-toggle" class="choice"><input id="schedule-enabled" type="checkbox"> 日時を指定する</label>
+        <label id="upload-notice-field" class="wide choice" hidden><input id="post-upload-notice" type="checkbox"><span>YouTubeの利用規約・コミュニティガイドラインを守り、著作権とプライバシーの権利を尊重して投稿することを確認しました。 <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer">利用規約</a></span></label>
+        <label id="schedule-toggle" class="choice"><input id="schedule-enabled" type="checkbox"><span>日時を指定する</span></label>
         <label id="schedule-field" hidden>投稿日時<input id="post-at" type="datetime-local"></label>
         <div class="wide actions"><button type="submit">Queueへ登録</button></div>
       </form>
@@ -48,7 +48,7 @@
     </section>
 
     <section id="publications" class="view">
-      <div class="heading"><div><p class="eyebrow">Publications</p><h1>投稿一覧</h1></div><button class="secondary refresh">更新</button></div>
+      <div class="heading"><div><p class="eyebrow">Publications</p><h1>投稿一覧</h1></div><div class="publication-controls"><label class="choice"><input id="hide-published" type="checkbox" checked><span>Published を非表示</span></label><button class="secondary refresh">更新</button></div></div>
       <div class="panel table-wrap"><table><thead><tr><th>Provider / Account</th><th>本文</th><th>予定</th><th>Publication</th><th>Queue</th><th>Remote ID</th></tr></thead><tbody id="publication-rows"></tbody></table></div>
     </section>
 
