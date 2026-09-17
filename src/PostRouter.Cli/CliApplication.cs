@@ -392,7 +392,7 @@ public static class CliApplication
             try { return await runtime.GitHubMedia.SetCredentialAsync(bytes, token); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }));
-        var clear = new Command("clear", "Remove the locally stored PAT");
+        var clear = new Command("clear", "Remove the local PAT; public assets remain until separately deleted");
         clear.SetAction((result, token) => ExecuteAsync(async () =>
         {
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
@@ -408,8 +408,65 @@ public static class CliApplication
             await host.CheckConnectionAsync(token);
             return new { reachable = true };
         }));
+        var stage = new Command("stage", "Upload one JPEG or MP4 as a public Release Asset");
+        var mediaFile = new Option<FileInfo>("--file") { Required = true };
+        var acknowledgePublic = new Option<bool>("--acknowledge-public")
+        {
+            Description = "Acknowledge that the asset is public until explicitly deleted"
+        };
+        stage.Options.Add(mediaFile); stage.Options.Add(acknowledgePublic);
+        stage.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            if (!result.GetValue(acknowledgePublic))
+                throw new ArgumentException("--acknowledge-public is required before staging media.");
+            var file = result.GetValue(mediaFile)!;
+            if (file.Exists && file.Length > 2L * 1024 * 1024 * 1024)
+                throw new InvalidDataException("Media exceeds the 2 GiB staging limit.");
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.StageGitHubMediaAsync(file.FullName, runtime.CreateGitHubMediaHostAsync, cancellationToken: token);
+        }, pendingIsIncomplete: true));
+        var list = new Command("list", "List local staging operations, including uncertain outcomes");
+        list.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.MediaOperations.ListAsync(token);
+        }));
+        var show = new Command("show", "Show one staging operation without exposing its local file path");
+        var showId = new Argument<Guid>("id");
+        show.Arguments.Add(showId);
+        show.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.MediaOperations.GetAsync(result.GetValue(showId), token);
+        }));
+        var recover = new Command("recover", "Look up an uncertain upload without uploading again");
+        var recoverId = new Argument<Guid>("id");
+        recover.Arguments.Add(recoverId);
+        recover.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var current = await runtime.MediaOperations.GetAsync(result.GetValue(recoverId), token);
+            if (current.Status != "Pending") return current;
+            using var host = await runtime.CreateGitHubMediaHostAsync(token);
+            return await runtime.MediaOperations.RecoverAsync(result.GetValue(recoverId), host, token);
+        }, pendingIsIncomplete: true));
+        var delete = new Command("delete", "Delete the remote Release Asset and keep the local operation history");
+        var deleteId = new Argument<Guid>("id");
+        var confirmDelete = new Option<bool>("--confirm") { Description = "Confirm deletion of the remote Release Asset" };
+        delete.Arguments.Add(deleteId); delete.Options.Add(confirmDelete);
+        delete.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            if (!result.GetValue(confirmDelete)) throw new ArgumentException("--confirm is required to delete a staged asset.");
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var current = await runtime.MediaOperations.GetAsync(result.GetValue(deleteId), token);
+            if (current.Status == "Deleted") return current;
+            using var host = await runtime.CreateGitHubMediaHostAsync(token);
+            return await runtime.MediaOperations.DeleteAsync(result.GetValue(deleteId), host, token);
+        }));
         media.Subcommands.Add(configure); media.Subcommands.Add(status);
         media.Subcommands.Add(credential); media.Subcommands.Add(check);
+        media.Subcommands.Add(stage); media.Subcommands.Add(list); media.Subcommands.Add(show);
+        media.Subcommands.Add(recover); media.Subcommands.Add(delete);
         return media;
     }
 
@@ -550,9 +607,15 @@ public static class CliApplication
         return result;
     }
 
-    private static async Task<int> ExecuteAsync(Func<Task<object>> action)
+    private static async Task<int> ExecuteAsync(Func<Task<object>> action, bool pendingIsIncomplete = false)
     {
-        try { WriteSuccess(await action()); return 0; }
+        try
+        {
+            var result = await action();
+            var pending = pendingIsIncomplete && result is PublicMediaOperationView { Status: "Pending" };
+            WriteSuccess(result, pending ? ["media_result_pending_recover_required"] : []);
+            return pending ? 7 : 0;
+        }
         catch (ArgumentException ex) { WriteError("invalid_input", ex.Message); return 2; }
         catch (PlatformNotSupportedException ex) { WriteError("platform", ex.Message); return 3; }
         catch (NotSupportedException ex) { WriteError("unsupported", ex.Message); return 2; }
@@ -569,6 +632,6 @@ public static class CliApplication
         catch (Exception ex) { WriteError("internal_error", ex.GetType().Name); return 1; }
     }
 
-    private static void WriteSuccess(object result) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result, warnings = Array.Empty<string>(), error = (object?)null }, JsonOptions));
+    private static void WriteSuccess(object result, string[] warnings) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result, warnings, error = (object?)null }, JsonOptions));
     private static void WriteError(string code, string message) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result = (object?)null, warnings = Array.Empty<string>(), error = new { code, message } }, JsonOptions));
 }

@@ -10,7 +10,8 @@ public interface IGitHubMediaConfigurationStore
     Task SaveAsync(GitHubMediaConfiguration configuration, CancellationToken cancellationToken = default);
 }
 
-public sealed class GitHubMediaConfigurationService(IGitHubMediaConfigurationStore settings, IVault vault)
+public sealed class GitHubMediaConfigurationService(
+    IGitHubMediaConfigurationStore settings, IVault vault, IPublicMediaOperationStore operations)
 {
     public const string CredentialPurpose = "github-media-staging-token";
 
@@ -27,6 +28,12 @@ public sealed class GitHubMediaConfigurationService(IGitHubMediaConfigurationSto
             throw new ArgumentException("GitHub media staging settings are invalid.");
         await using var lease = await settings.AcquireAsync(cancellationToken).ConfigureAwait(false);
         var previous = await settings.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var targetChanged = previous is not null
+            && (!string.Equals(previous.Owner, owner, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(previous.Repository, repository, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(previous.ReleaseTag, releaseTag, StringComparison.Ordinal));
+        if (targetChanged && (await operations.ListAsync(cancellationToken).ConfigureAwait(false)).Any(item => !item.Deleted))
+            throw new InvalidOperationException("github_media_operations_active");
         var sameRepository = previous is not null
             && string.Equals(previous.Owner, owner, StringComparison.OrdinalIgnoreCase)
             && string.Equals(previous.Repository, repository, StringComparison.OrdinalIgnoreCase);

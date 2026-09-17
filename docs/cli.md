@@ -37,7 +37,9 @@
 
 Phase 2Aの実装名は、上表の将来alias UXより安全なID指定を優先して、`account connect x --client-id ... --redirect-uri ... --alias ...`、`account status/disconnect/reset/revoke/reconnect --account UUID`とする。disconnect/resetはlocal tokenだけを削除し、revokeはX公式revokeを試みた後、成否を明示してlocal tokenを必ず削除する。reconnectは保存済みremote subjectと一致しなければ拒否する。
 
-GitHub一時公開メディアの現行CLIは `media configure --owner OWNER --repository REPO --tag TAG`、`media credential set`（非表示入力）、`media credential set --token-stdin`、`media credential clear`、`media status`、`media check`。`check` はpublic repositoryとpublished Releaseをread-onlyで確認し、素材をuploadしない。PATを引数で渡すoption、素材のstage/recover/deleteコマンドはまだ提供しない。PATはvaultに保存し、JSON結果には登録有無だけを出す。
+GitHub一時公開メディアの現行CLIは `media configure --owner OWNER --repository REPO --tag TAG`、`media credential set`（非表示入力）、`media credential set --token-stdin`、`media credential clear`、`media status`、`media check`。`check` はpublic repositoryとpublished Releaseをread-onlyで確認し、素材をuploadしない。PATを引数で渡すoptionはない。PATはvaultに保存し、JSON結果には登録有無だけを出す。
+
+`media stage --file FILE --acknowledge-public` はJPEG/MP4を公開stageし、操作IDと状態を返す。`media list` / `media show ID` は保存済み操作を表示する。`media recover ID` はPendingの結果を照会するだけで再uploadしない。`media delete ID --confirm` はGitHub上のassetだけを削除する。stage/recover結果がPendingなら終了コード7で操作IDを返すので、そのIDで照会し、新しいstageで代用しない。未削除の操作がある間は公開先設定を変更できない。[詳細](temporary-public-media-host.md)
 
 ## 共通投稿入力
 

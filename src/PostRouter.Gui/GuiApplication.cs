@@ -39,6 +39,8 @@ public static class GuiApplication
     private const long MaximumImageBytes = 5L * 1024 * 1024;
     private const long MaximumVideoBytes = 8L * 1024 * 1024 * 1024;
     private const long MaximumVideoRequestBodyBytes = MaximumVideoBytes + 1024 * 1024;
+    private const long MaximumStagingBytes = 2L * 1024 * 1024 * 1024;
+    private const long MaximumStagingRequestBodyBytes = MaximumStagingBytes + 1024 * 1024;
     private static readonly string[] AssetNames = ["index.html", "app.css", "app.js"];
     private static readonly HashSet<string> OAuthStateErrorCodes = new(StringComparer.Ordinal)
     {
@@ -49,7 +51,17 @@ public static class GuiApplication
         "auth_required",
     };
 
-    public static async Task<GuiHost> StartAsync(GuiOptions options, CancellationToken cancellationToken = default)
+    public static Task<GuiHost> StartAsync(GuiOptions options, CancellationToken cancellationToken = default) =>
+        StartCoreAsync(options, null, cancellationToken);
+
+    internal static Task<GuiHost> StartForTestsAsync(GuiOptions options,
+        Func<CancellationToken, Task<GitHubReleaseMediaHost>> createMediaHost,
+        CancellationToken cancellationToken = default) =>
+        StartCoreAsync(options, createMediaHost, cancellationToken);
+
+    private static async Task<GuiHost> StartCoreAsync(GuiOptions options,
+        Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost,
+        CancellationToken cancellationToken)
     {
         if (options.Port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(options), "GUI port must be between 0 and 65535.");
         var runtime = await RuntimeFactory.CreateAsync(options.DataDirectory, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -74,7 +86,7 @@ public static class GuiApplication
                 server.Listen(IPAddress.Loopback, options.Port);
             });
             var app = builder.Build();
-            Configure(app, runtime);
+            Configure(app, runtime, createMediaHost ?? runtime.CreateGitHubMediaHostAsync);
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
             var address = ResolveAddress(app);
             if (options.OpenBrowser)
@@ -91,7 +103,8 @@ public static class GuiApplication
         }
     }
 
-    private static void Configure(WebApplication app, PostRouterRuntime runtime)
+    private static void Configure(WebApplication app, PostRouterRuntime runtime,
+        Func<CancellationToken, Task<GitHubReleaseMediaHost>> createMediaHost)
     {
         var csrfToken = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         var authorizations = new ConcurrentDictionary<string, PendingAuthorization>(StringComparer.Ordinal);
@@ -113,7 +126,13 @@ public static class GuiApplication
                 return;
             }
             var isMediaRequest = context.Request.Path.Equals(new PathString("/api/posts/images")) ||
-                context.Request.Path.Equals(new PathString("/api/posts/video"));
+                context.Request.Path.Equals(new PathString("/api/posts/video")) ||
+                context.Request.Path.Equals(new PathString("/api/media/stage"));
+            if (context.Request.Path.Equals(new PathString("/api/media/stage")))
+            {
+                var bodyLimit = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+                if (bodyLimit is { IsReadOnly: false }) bodyLimit.MaxRequestBodySize = MaximumStagingRequestBodyBytes;
+            }
             var isSecretFileRequest = context.Request.Path.Equals(new PathString("/api/accounts/connect/file")) ||
                 context.Request.Path.Value?.EndsWith("/reconnect/file", StringComparison.Ordinal) == true;
             if (HttpMethods.IsPost(context.Request.Method) && !isMediaRequest && !isSecretFileRequest &&
@@ -155,9 +174,59 @@ public static class GuiApplication
             Results.Json(await runtime.GitHubMedia.ClearCredentialAsync(token).ConfigureAwait(false)));
         app.MapPost("/api/media/check", async (CancellationToken token) =>
         {
-            using var host = await runtime.CreateGitHubMediaHostAsync(token).ConfigureAwait(false);
+            using var host = await createMediaHost(token).ConfigureAwait(false);
             await host.CheckConnectionAsync(token).ConfigureAwait(false);
             return Results.Json(new { reachable = true });
+        });
+        app.MapGet("/api/media/operations", async (CancellationToken token) =>
+            Results.Json(await runtime.MediaOperations.ListAsync(token).ConfigureAwait(false)));
+        app.MapGet("/api/media/operations/{id:guid}", async (Guid id, CancellationToken token) =>
+            Results.Json(await runtime.MediaOperations.GetAsync(id, token).ConfigureAwait(false)));
+        app.MapPost("/api/media/stage", async (HttpRequest request, CancellationToken token) =>
+        {
+            if (request.ContentLength > MaximumStagingRequestBodyBytes)
+                throw new BadHttpRequestException("Staging request is too large.");
+            using var host = await createMediaHost(token).ConfigureAwait(false);
+            await host.CheckConnectionAsync(token).ConfigureAwait(false);
+            var form = await request.ReadFormAsync(token).ConfigureAwait(false);
+            if (form["acknowledgePublic"] != "true")
+                throw new ArgumentException("Public staging must be acknowledged.");
+            if (string.IsNullOrEmpty(form["expectedOwner"]) || string.IsNullOrEmpty(form["expectedRepository"])
+                || string.IsNullOrEmpty(form["expectedReleaseTag"]))
+                throw new ArgumentException("Expected staging target is required.");
+            if (form.Files.Count != 1 || form.Files[0].Name != "media")
+                throw new ArgumentException("One media file is required.");
+            var file = form.Files[0];
+            if (file.Length is <= 0 or > MaximumStagingBytes)
+                throw new ArgumentException("Media size is outside the staging limit.");
+            var incoming = Path.Combine(runtime.DataDirectory, "incoming");
+            Directory.CreateDirectory(incoming);
+            var path = Path.Combine(incoming, $"{Guid.NewGuid():N}.upload");
+            try
+            {
+                await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
+                    FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                    await file.CopyToAsync(output, token).ConfigureAwait(false);
+                var expected = new GitHubMediaConfigurationStatus(form["expectedOwner"].ToString(),
+                    form["expectedRepository"].ToString(), form["expectedReleaseTag"].ToString(), false);
+                return Results.Json(await runtime.StageGitHubMediaAsync(path, createMediaHost, expected, token).ConfigureAwait(false));
+            }
+            finally { try { File.Delete(path); } catch (IOException) { } }
+        });
+        app.MapPost("/api/media/operations/{id:guid}/recover", async (Guid id, CancellationToken token) =>
+        {
+            var current = await runtime.MediaOperations.GetAsync(id, token).ConfigureAwait(false);
+            if (current.Status != "Pending") return Results.Json(current);
+            using var host = await createMediaHost(token).ConfigureAwait(false);
+            return Results.Json(await runtime.MediaOperations.RecoverAsync(id, host, token).ConfigureAwait(false));
+        });
+        app.MapPost("/api/media/operations/{id:guid}/delete", async (Guid id, MediaDeleteRequest request, CancellationToken token) =>
+        {
+            if (!request.Confirmed) throw new ArgumentException("Remote asset deletion must be confirmed.");
+            var current = await runtime.MediaOperations.GetAsync(id, token).ConfigureAwait(false);
+            if (current.Status == "Deleted") return Results.Json(current);
+            using var host = await createMediaHost(token).ConfigureAwait(false);
+            return Results.Json(await runtime.MediaOperations.DeleteAsync(id, host, token).ConfigureAwait(false));
         });
         app.MapGet("/api/publications", async (int? limit, CancellationToken token) =>
             Results.Json(await runtime.Operations.PublicationsAsync(limit ?? 200, token).ConfigureAwait(false)));
@@ -403,6 +472,7 @@ public static class GuiApplication
     private static (int StatusCode, string Code, string Message) MapError(Exception exception) => exception switch
     {
         ArgumentException => (StatusCodes.Status400BadRequest, "invalid_input", "The submitted values are invalid."),
+        InvalidDataException => (StatusCodes.Status400BadRequest, "invalid_input", "The media or saved record is invalid."),
         BadHttpRequestException => (StatusCodes.Status400BadRequest, "invalid_input", "The request is malformed."),
         KeyNotFoundException => (StatusCodes.Status404NotFound, "not_found", "The requested item was not found."),
         NotSupportedException => (StatusCodes.Status422UnprocessableEntity, "unsupported", "The selected provider does not support this operation."),
@@ -448,6 +518,7 @@ public static class GuiApplication
         public override string ToString() => "[REDACTED RECONNECT REQUEST]";
     }
     private sealed record MediaSettingsRequest(string Owner, string Repository, string ReleaseTag);
+    private sealed record MediaDeleteRequest(bool Confirmed);
     private sealed record MediaCredentialRequest(string Token)
     {
         public override string ToString() => "[REDACTED GITHUB MEDIA CREDENTIAL]";

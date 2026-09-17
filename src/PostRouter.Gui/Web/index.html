@@ -75,7 +75,7 @@
         <label>Owner<input id="media-owner" required maxlength="100" autocomplete="off"></label>
         <label>Repository<input id="media-repository" required maxlength="100" autocomplete="off"></label>
         <label class="wide">Release tag<input id="media-tag" required maxlength="100" autocomplete="off"></label>
-        <p class="wide hint">OwnerまたはRepositoryを変更すると、保存済みPATは削除されます。</p>
+        <p class="wide hint">未削除のstaging操作がある間は公開先を変更できません。OwnerまたはRepositoryを変更すると、保存済みPATは削除されます。</p>
         <div class="wide actions"><button type="submit">公開先を保存</button></div>
       </form>
       <form id="media-credential-form" class="panel form-grid">
@@ -86,6 +86,14 @@
         <div class="wide actions"><button id="media-clear" type="button" class="secondary">PATを削除</button><button type="submit">PATを登録・更新</button></div>
       </form>
       <div class="panel"><h2>接続確認</h2><p class="hint">設定したReleaseへのアクセスを確認します。素材のアップロードは行いません。</p><button id="media-check" type="button">接続を確認</button></div>
+      <form id="media-stage-form" class="panel form-grid">
+        <h2 class="wide">素材を公開stage</h2>
+        <p class="wide hint">JPEGまたはMP4をGitHub Release Assetとして公開します（最大2 GiB）。論理期限を過ぎても自動削除されません。利用後は下の履歴から削除してください。</p>
+        <label class="wide">素材ファイル<input id="media-stage-file" type="file" accept="image/jpeg,video/mp4,.jpg,.jpeg,.mp4" required></label>
+        <label class="wide choice"><input id="media-stage-acknowledge" type="checkbox" required><span>この素材が削除するまでインターネットから取得可能になることを確認しました。</span></label>
+        <div class="wide actions"><button id="media-stage-submit" type="submit">公開stage</button></div>
+      </form>
+      <div class="panel"><div class="heading"><h2>staging履歴</h2><button id="media-operations-refresh" type="button" class="secondary">更新</button></div><p class="hint">Pendingは結果が不明な操作です。recoverは照会のみで再アップロードしません。DeleteはGitHub上のassetだけを削除します。</p><div id="media-operations" class="cards"></div></div>
     </section>
 
     <dialog id="reconnect-dialog">

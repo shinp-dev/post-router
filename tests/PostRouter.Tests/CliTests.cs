@@ -11,6 +11,33 @@ namespace PostRouter.Tests;
 public sealed class CliTests
 {
     [Fact]
+    public async Task Media_cli_requires_explicit_public_stage_and_remote_delete_confirmation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-media-guards", Guid.NewGuid().ToString("N"));
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var stage = await InvokeAsync(["--data-dir", directory, "media", "stage", "--file", "missing.jpg"]);
+            Assert.NotEqual(0, stage.ExitCode);
+            Assert.Contains("acknowledge-public", stage.Output, StringComparison.Ordinal);
+            var delete = await InvokeAsync(["--data-dir", directory, "media", "delete", Guid.NewGuid().ToString("D")]);
+            Assert.NotEqual(0, delete.ExitCode);
+            Assert.Contains("--confirm", delete.Output, StringComparison.Ordinal);
+            var list = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, list.ExitCode);
+            using var json = JsonDocument.Parse(list.Output);
+            Assert.Empty(json.RootElement.GetProperty("result").EnumerateArray());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Media_cli_registers_pat_from_stdin_without_echo_or_plaintext_storage()
     {
         const string pat = "github-cli-pat-secret-marker";

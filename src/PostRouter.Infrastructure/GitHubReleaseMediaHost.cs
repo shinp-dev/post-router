@@ -83,6 +83,7 @@ public sealed class GitHubReleaseMediaHost : ITemporaryPublicMediaHost, IDisposa
     {
         var extension = Extension(asset.DetectedMime);
         ValidateSource(asset.Sha256, asset.SizeBytes);
+        if (asset.SizeBytes > _options.MaximumBytes) throw Safe("media_size_limit_exceeded");
         var now = _time.GetUtcNow();
         var expiry = expiresAt ?? now.Add(_options.DefaultLifetime ?? TimeSpan.FromHours(24));
         if (expiry <= now) throw Safe("media_expiry_invalid");

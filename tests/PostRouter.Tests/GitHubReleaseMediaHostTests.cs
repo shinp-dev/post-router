@@ -79,6 +79,16 @@ public sealed class GitHubReleaseMediaHostTests
     }
 
     [Fact]
+    public void Rejects_oversized_asset_before_persisting_a_stage_operation()
+    {
+        using var setup = new Setup();
+        var asset = setup.Asset("image/jpeg") with { SizeBytes = 2L * 1024 * 1024 * 1024 + 1 };
+        var error = Assert.Throws<TemporaryPublicMediaException>(() => setup.Host.Prepare(asset));
+        Assert.Equal("media_size_limit_exceeded", error.Code);
+        Assert.Empty(setup.Server.Hosts);
+    }
+
+    [Fact]
     public async Task Missing_media_is_safe_and_never_uploaded()
     {
         using var setup = new Setup();
