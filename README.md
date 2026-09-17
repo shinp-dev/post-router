@@ -41,6 +41,8 @@ YouTube Desktop OAuthでは、Googleが発行したclient secretを必要とす�
 
 GUIから非公開YouTube動画を投稿するには、`pub gui`で接続済みYouTubeアカウントを選び、MP4、タイトル、Made for Kidsの明示選択、upload noticeの確認を入力してQueueへ登録する。説明と合成・改変メディアの指定もできる。公開設定は現在GUIでprivateに固定される。別processの`pub worker once`または`pub worker run`がuploadとprocessing確認を進める。upload完了時からvideo IDが`pub post status <post-id>`とGUI詳細に表示され、remoteのprivate状態を再確認した後にPost Router側も`Published`になる。
 
+明示的にstageしたローカル素材を、一時的なpublic HTTPS URLとして渡す汎用部品を用意している。**staged mediaは削除するまでpublicになる。** GitHub Release Assetを使う実装と、期限・復旧・削除の境界は[Temporary public media host](docs/temporary-public-media-host.md)を参照。現時点では投稿AdapterやGUIには接続していない。
+
 ```powershell
 pub account connect youtube --client-id <desktop-client-id> --redirect-uri http://127.0.0.1:8765/callback --alias youtube-main --client-secret-file "C:\secure\youtube-client-secret.txt"
 ```
@@ -103,5 +105,6 @@ Xのtext-onlyとJPEG画像（1〜4枚）以外は今後の目標UXであり、�
 | [Phase 1実装監査](docs/phase1-review.md) | 実装境界、自動試験、実機gate |
 | [Phase 2A X](docs/phase2a-x.md) | X text投稿、OAuth、解除、二重投稿境界、検証状態 |
 | [Phase 2B GUI](docs/phase2b-gui.md) | localhost操作盤、Application境界、CSRF、画面・検証範囲 |
+| [Temporary public media host](docs/temporary-public-media-host.md) | 明示的な一時公開、GitHub Release Asset、opaque handle、復旧と削除 |
 
 公式APIの調査と設計判断は区別する。Instagramは公式本文の一部取得に制限があり、細部の未確認事項をAPI調査書のG-IGに明記した。設計完了は審査通過・本番動作確認を意味しない。
