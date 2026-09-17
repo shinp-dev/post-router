@@ -383,10 +383,8 @@ public static class CliApplication
     private static async Task<string?> ReadClientSecretAsync(FileInfo? file, CancellationToken cancellationToken)
     {
         if (file is null) return null;
-        if (file.Length is < 1 or > 4096) throw new ArgumentException("Client secret file must contain 1 to 4096 bytes.");
-        var clientSecret = (await File.ReadAllTextAsync(file.FullName, cancellationToken)).TrimEnd('\r', '\n');
-        if (string.IsNullOrWhiteSpace(clientSecret)) throw new ArgumentException("Client secret file is empty.");
-        return clientSecret;
+        await using var stream = file.OpenRead();
+        return await ClientSecretFile.ReadAsync(stream, file.Length, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<(string Code, string State)> ReceiveOAuthCallbackAsync(AuthorizationSession session, CancellationToken cancellationToken)

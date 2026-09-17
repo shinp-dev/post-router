@@ -472,6 +472,9 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
             "SELECT state FROM publications WHERE id=$id", cancellationToken, ("$id", Id(item.Publication.Id)))
             ?? throw new InvalidOperationException("Publication disappeared before receipt commit."));
 
+        var knownRemoteId = await SqliteDatabase.ScalarAsync<string>(connection, transaction,
+            "SELECT provider_object_id FROM remote_objects WHERE publication_id=$id AND kind='final' ORDER BY observed_at DESC LIMIT 1",
+            cancellationToken, ("$id", Id(item.Publication.Id)));
         if (result.RemoteObjectId is not null)
             await SqliteDatabase.ExecuteAsync(connection, transaction,
                 "INSERT OR IGNORE INTO remote_objects(id,publication_id,account_id,kind,provider_object_id,observed_at) VALUES($id,$publication,$account,'final',$remote,$at)", cancellationToken,
@@ -491,7 +494,16 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
             case StepOutcome.Completed:
                 {
                     var state = result.ObservedState ?? (attempt.Effect == StepEffect.MayPublish ? PublicationState.Published : PublicationState.Ready);
-                    PublicationStateMachine.EnsureCanTransition(currentState, state);
+                    if (currentState == PublicationState.Ready && state == PublicationState.Published)
+                    {
+                        if (item.Publication.ProviderKey != "youtube" || item.Input.Target.Visibility != "private" ||
+                            attempt.StepKey != "youtube.finish-private.v1" || attempt.Effect != StepEffect.ConfirmPrivate ||
+                            result.EffectCertainty != EffectCertainty.Confirmed ||
+                            string.IsNullOrWhiteSpace(knownRemoteId) ||
+                            !string.Equals(knownRemoteId, result.RemoteObjectId, StringComparison.Ordinal))
+                            throw new InvalidOperationException("Private publication confirmation is invalid.");
+                    }
+                    else PublicationStateMachine.EnsureCanTransition(currentState, state);
                     await SqliteDatabase.ExecuteAsync(connection, transaction,
                         "UPDATE publications SET state=$state,confirmed_at=$confirmed,published_at=$published,safe_error=NULL,failure_category=NULL,generation=generation+1 WHERE id=$id", cancellationToken,
                         ("$state", state.ToString()), ("$confirmed", At(now)), ("$published", state == PublicationState.Published ? At(now) : null), ("$id", Id(item.Publication.Id)));

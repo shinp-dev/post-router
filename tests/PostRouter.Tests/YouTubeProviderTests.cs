@@ -215,6 +215,116 @@ public sealed class YouTubeProviderTests
     }
 
     [Fact]
+    public async Task Private_upload_confirms_remote_video_and_persists_id_before_processing_finishes()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var media = await VideoAsync(context, "private.mp4");
+        var starts = 0;
+        var uploads = 0;
+        var reads = 0;
+        using var http = Client((request, _, _) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                Interlocked.Increment(ref starts);
+                var response = Json(HttpStatusCode.OK, "{}");
+                response.Headers.Location = new Uri("https://www.googleapis.com/upload/youtube/v3/videos?upload_id=private-session");
+                return Task.FromResult(response);
+            }
+            if (request.Method == HttpMethod.Put)
+            {
+                Interlocked.Increment(ref uploads);
+                return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"private-video-id\"}"));
+            }
+            Interlocked.Increment(ref reads);
+            Assert.Contains("id=private-video-id", request.RequestUri?.Query, StringComparison.Ordinal);
+            return Task.FromResult(Processed("private-video-id", "private"));
+        });
+        var setup = await BuildAsync(context, http);
+        var queued = await setup.Posts.EnqueueAsync(PrivateIntent(context, setup.Account.AccountId, "private-finish", media.Path, media.Bytes));
+
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        var uploaded = (await setup.Posts.GetAsync(queued.PostId))!;
+        Assert.Equal(PublicationState.Processing, Assert.Single(uploaded.Publications).State);
+        Assert.Equal("private-video-id", Assert.Single(uploaded.RemoteObjects).ProviderObjectId);
+        await setup.Worker.DisposeAsync();
+
+        var restarted = await BuildAsync(context, http);
+        Assert.Equal(1, await restarted.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.Ready, Assert.Single((await restarted.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(1, await restarted.Worker.RunOnceAsync());
+        var finished = (await restarted.Posts.GetAsync(queued.PostId))!;
+        Assert.Equal(PublicationState.Published, Assert.Single(finished.Publications).State);
+        Assert.Null(Assert.Single(finished.Publications).SafeError);
+        Assert.Equal("private-video-id", Assert.Single(finished.RemoteObjects).ProviderObjectId);
+        Assert.Equal(0, await restarted.Worker.RunOnceAsync());
+        Assert.Equal(1, starts);
+        Assert.Equal(1, uploads);
+        Assert.Equal(2, reads);
+        await restarted.Worker.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData("public")]
+    [InlineData("unlisted")]
+    public async Task Private_confirmation_rejects_unexpected_remote_visibility(string privacy)
+    {
+        await using var context = await TestContext.CreateAsync();
+        var media = await VideoAsync(context, "private-mismatch.mp4");
+        using var http = Client((request, _, _) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                var response = Json(HttpStatusCode.OK, "{}");
+                response.Headers.Location = new Uri("https://www.googleapis.com/upload/youtube/v3/videos?upload_id=mismatch-session");
+                return Task.FromResult(response);
+            }
+            if (request.Method == HttpMethod.Put) return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"mismatch-id\"}"));
+            return Task.FromResult(Processed("mismatch-id", privacy));
+        });
+        var setup = await BuildAsync(context, http);
+        var queued = await setup.Posts.EnqueueAsync(PrivateIntent(context, setup.Account.AccountId, $"private-{privacy}", media.Path, media.Bytes));
+        for (var run = 0; run < 4; run++) Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        var status = (await setup.Posts.GetAsync(queued.PostId))!;
+        Assert.Equal(PublicationState.NeedsAttention, Assert.Single(status.Publications).State);
+        Assert.Equal("mismatch-id", Assert.Single(status.RemoteObjects).ProviderObjectId);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Private_confirmation_with_required_approval_waits_at_boundary()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var media = await VideoAsync(context, "private-approval.mp4");
+        var reads = 0;
+        using var http = Client((request, _, _) =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                var response = Json(HttpStatusCode.OK, "{}");
+                response.Headers.Location = new Uri("https://www.googleapis.com/upload/youtube/v3/videos?upload_id=private-approval-session");
+                return Task.FromResult(response);
+            }
+            if (request.Method == HttpMethod.Put) return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"private-approval-id\"}"));
+            Interlocked.Increment(ref reads);
+            return Task.FromResult(Processed("private-approval-id", "private"));
+        });
+        var setup = await BuildAsync(context, http);
+        var queued = await setup.Posts.EnqueueAsync(PrivateIntent(context, setup.Account.AccountId, "private-approval", media.Path, media.Bytes,
+            ApprovalPolicy.RequireApproval));
+        for (var run = 0; run < 3; run++) Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.AwaitingApproval, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(1, reads);
+        await setup.Operations.ApproveAsync(Assert.Single(queued.PublicationIds));
+        Assert.Equal(1, await setup.Worker.RunOnceAsync());
+        Assert.Equal(PublicationState.Published, Assert.Single((await setup.Posts.GetAsync(queued.PostId))!.Publications).State);
+        Assert.Equal(2, reads);
+        await setup.Worker.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Upload_response_loss_queries_session_and_resumes_without_new_session()
     {
         await using var context = await TestContext.CreateAsync();
@@ -265,8 +375,10 @@ public sealed class YouTubeProviderTests
         await setup.Worker.DisposeAsync();
     }
 
-    [Fact]
-    public async Task Approval_gate_blocks_only_final_visibility_update()
+    [Theory]
+    [InlineData("public")]
+    [InlineData("unlisted")]
+    public async Task Approval_gate_blocks_only_final_visibility_update(string visibility)
     {
         await using var context = await TestContext.CreateAsync();
         var media = await VideoAsync(context, "approval.mp4");
@@ -282,10 +394,12 @@ public sealed class YouTubeProviderTests
             if (call == 2) return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-approval\"}"));
             if (call == 3) return Task.FromResult(Processed("video-approval", "private"));
             Interlocked.Increment(ref updateCalls);
-            return Task.FromResult(Json(HttpStatusCode.OK, "{\"id\":\"video-approval\",\"status\":{\"privacyStatus\":\"public\"}}"));
+            return Task.FromResult(Json(HttpStatusCode.OK, $"{{\"id\":\"video-approval\",\"status\":{{\"privacyStatus\":\"{visibility}\"}}}}"));
         });
         var setup = await BuildAsync(context, http);
-        var queued = await setup.Posts.EnqueueAsync(Intent(context, setup.Account.AccountId, "youtube-approval", media.Path, media.Bytes, ApprovalPolicy.RequireApproval));
+        var intent = Intent(context, setup.Account.AccountId, $"youtube-approval-{visibility}", media.Path, media.Bytes, ApprovalPolicy.RequireApproval);
+        intent = intent with { Targets = [intent.Targets[0] with { Visibility = visibility }] };
+        var queued = await setup.Posts.EnqueueAsync(intent);
         var publicationId = Assert.Single(queued.PublicationIds);
 
         Assert.Equal(1, await setup.Worker.RunOnceAsync());
@@ -414,6 +528,20 @@ public sealed class YouTubeProviderTests
         return new(key, new Content(Guid.NewGuid(), ContentKind.Video, "description", "Video title", [asset]),
             [new TargetIntent(accountId, "youtube", "public", "youtube-options/v1", 1, "{}", "youtube-test", approvalPolicy)],
             new ScheduleIntent(ScheduleMode.Immediate, context.Time.GetUtcNow(), TimeSpan.FromMinutes(30)));
+    }
+
+    private static CanonicalPostIntent PrivateIntent(TestContext context, Guid accountId, string key, string path, byte[] bytes,
+        ApprovalPolicy approvalPolicy = ApprovalPolicy.Automatic)
+    {
+        var source = Intent(context, accountId, key, path, bytes, approvalPolicy);
+        return source with
+        {
+            Targets = [source.Targets[0] with
+        {
+            Visibility = "private",
+            CanonicalOptionsJson = "{\"madeForKids\":false,\"uploadNoticeAcknowledged\":true}",
+        }]
+        };
     }
 
     private static async Task<(string Path, byte[] Bytes, long Length)> VideoAsync(TestContext context, string name, byte[]? bytes = null)

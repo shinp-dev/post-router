@@ -86,24 +86,41 @@ function renderProviders() {
   const post = byId("post-account"); post.replaceChildren();
   accounts.filter(item => item.status === "Connected" || item.status === "Ready").forEach(item => {
     const capability = providers.find(provider => provider.providerKey === item.provider);
-    if (capability?.contentKinds.includes("TextOnly")) post.add(new Option(`${item.provider} / ${item.displayName || item.alias}`, item.accountId));
+    if (capability?.contentKinds.some(kind => ["TextOnly", "ImageSet", "Video"].includes(kind)))
+      post.add(new Option(`${item.provider} / ${item.displayName || item.alias}`, item.accountId));
   });
   if (!post.options.length) post.add(new Option("接続済みアカウントがありません", ""));
-  updateImageCapability();
+  updatePostCapability();
 }
 
 function updateClientSecretField() {
   const enabled = byId("connect-provider").value === "youtube";
   byId("client-secret-field").hidden = !enabled;
-  if (!enabled) byId("client-secret").value = "";
+  if (!enabled) byId("client-secret-file").value = "";
 }
 
-function updateImageCapability() {
+function updatePostCapability() {
   const account = accounts.find(item => item.accountId === byId("post-account").value);
   const capability = providers.find(item => item.providerKey === account?.provider);
-  const enabled = capability?.contentKinds.includes("ImageSet") === true;
-  byId("image-field").hidden = !enabled;
-  if (!enabled) byId("post-images").value = "";
+  const video = capability?.contentKinds.includes("Video") === true && capability?.contentKinds.includes("TextOnly") !== true;
+  const images = capability?.contentKinds.includes("ImageSet") === true && !video;
+  byId("text-field").hidden = video;
+  byId("post-text").required = !video;
+  byId("image-field").hidden = !images;
+  if (!images) byId("post-images").value = "";
+  for (const id of ["video-field", "title-field", "description-field", "kids-field", "synthetic-field", "visibility-field", "upload-notice-field"])
+    byId(id).hidden = !video;
+  byId("post-video").required = video;
+  byId("post-title").required = video;
+  byId("post-made-for-kids").required = video;
+  byId("post-upload-notice").required = video;
+  if (!video) {
+    byId("post-video").value = "";
+    byId("post-made-for-kids").value = "";
+    byId("post-upload-notice").checked = false;
+  }
+  byId("schedule-toggle").hidden = video;
+  if (video) { byId("schedule-enabled").checked = false; byId("schedule-field").hidden = true; byId("post-at").required = false; }
 }
 
 function renderPublications(items) {
@@ -201,16 +218,22 @@ async function accountAction(id, action) {
 function reconnect(id) {
   if (accounts.find(account => account.accountId === id)?.provider === "youtube") {
     reconnectAccountId = id;
-    byId("reconnect-client-secret").value = "";
+    byId("reconnect-client-secret-file").value = "";
     byId("reconnect-dialog").showModal();
     return;
   }
   startReconnect(id, null);
 }
 
-async function startReconnect(id, clientSecret) {
+async function startReconnect(id, clientSecretFile) {
   const popup = prepareAuthorizationWindow();
-  try { const result = await request(`/api/accounts/${id}/reconnect`, { method: "POST", body: JSON.stringify({ clientSecret }) }); if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。"); }
+  try {
+    const body = clientSecretFile ? new FormData() : JSON.stringify({ clientSecret: null });
+    if (clientSecretFile) body.set("clientSecretFile", clientSecretFile);
+    const path = `/api/accounts/${id}/reconnect${clientSecretFile ? "/file" : ""}`;
+    const result = await request(path, { method: "POST", body });
+    if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。");
+  }
   catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
 }
 
@@ -238,16 +261,16 @@ byId("detail-close").addEventListener("click", () => byId("detail-dialog").close
 byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").close());
 byId("schedule-enabled").addEventListener("change", event => { byId("schedule-field").hidden = !event.target.checked; byId("post-at").required = event.target.checked; });
 byId("post-text").addEventListener("input", event => { byId("text-count").textContent = `${[...event.target.value].length} / 280`; pendingRequestId = crypto.randomUUID(); });
-byId("post-account").addEventListener("change", updateImageCapability);
+byId("post-account").addEventListener("change", updatePostCapability);
 byId("connect-provider").addEventListener("change", updateClientSecretField);
-byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
+byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret-file").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
 byId("reconnect-form").addEventListener("submit", event => {
   event.preventDefault();
   const id = reconnectAccountId;
-  const clientSecret = byId("reconnect-client-secret").value || null;
-  byId("reconnect-client-secret").value = "";
+  const clientSecretFile = byId("reconnect-client-secret-file").files[0] || null;
+  byId("reconnect-client-secret-file").value = "";
   byId("reconnect-dialog").close(); reconnectAccountId = null;
-  if (id) startReconnect(id, clientSecret);
+  if (id) startReconnect(id, clientSecretFile);
 });
 
 byId("post-form").addEventListener("submit", async event => {
@@ -256,9 +279,26 @@ byId("post-form").addEventListener("submit", async event => {
     const scheduled = byId("schedule-enabled").checked;
     const value = byId("post-at").value;
     const publishAt = scheduled ? new Date(value).toISOString() : null;
+    const account = accounts.find(item => item.accountId === byId("post-account").value);
+    const capability = providers.find(item => item.providerKey === account?.provider);
+    const video = capability?.contentKinds.includes("Video") === true && capability?.contentKinds.includes("TextOnly") !== true;
     const images = [...byId("post-images").files];
     let result;
-    if (images.length) {
+    if (video) {
+      const file = byId("post-video").files[0];
+      if (!file) throw new Error("MP4動画を選択してください。");
+      if (!byId("post-title").value.trim()) throw new Error("タイトルを入力してください。");
+      if (byId("post-made-for-kids").value === "") throw new Error("Made for Kidsを選択してください。");
+      if (!byId("post-upload-notice").checked) throw new Error("YouTube upload noticeを確認してください。");
+      if (byId("post-visibility").value !== "private") throw new Error("非公開のみ選択できます。");
+      const body = new FormData();
+      body.set("accountId", byId("post-account").value); body.set("clientRequestId", pendingRequestId);
+      body.set("title", byId("post-title").value); body.set("description", byId("post-description").value);
+      body.set("madeForKids", byId("post-made-for-kids").value);
+      body.set("containsSyntheticMedia", String(byId("post-synthetic").checked));
+      body.set("uploadNoticeAcknowledged", "true"); body.set("visibility", "private"); body.set("video", file);
+      result = await request("/api/posts/video", { method: "POST", body });
+    } else if (images.length) {
       if (images.length > 4 || images.some(file => file.size > 5 * 1024 * 1024 || file.type !== "image/jpeg")) throw new Error("JPEG画像は最大4枚、各5 MBまでです。");
       const body = new FormData(); body.set("accountId", byId("post-account").value); body.set("text", byId("post-text").value); body.set("clientRequestId", pendingRequestId);
       if (publishAt) body.set("publishAt", publishAt); images.forEach(file => body.append("images", file));
@@ -268,7 +308,10 @@ byId("post-form").addEventListener("submit", async event => {
       result = await request("/api/posts", { method: "POST", body: JSON.stringify(body) });
     }
     pendingRequestId = crypto.randomUUID(); byId("post-text").value = ""; byId("text-count").textContent = "0 / 280";
-    byId("post-images").value = "";
+    byId("post-images").value = ""; byId("post-video").value = "";
+    byId("post-title").value = ""; byId("post-description").value = "";
+    byId("post-made-for-kids").value = ""; byId("post-synthetic").checked = false;
+    byId("post-upload-notice").checked = false;
     showNotice(`Queueへ登録しました: ${result.postId}`); showView("publications"); await refreshAll();
   } catch (error) { showNotice(error.message, true); }
 });
@@ -277,11 +320,17 @@ byId("connect-form").addEventListener("submit", async event => {
   event.preventDefault();
   const popup = prepareAuthorizationWindow();
   try {
-    const body = { provider: byId("connect-provider").value, clientId: byId("client-id").value, alias: byId("account-alias").value || null,
-      clientSecret: byId("connect-provider").value === "youtube" ? byId("client-secret").value || null : null };
-    const payload = JSON.stringify(body);
-    byId("client-secret").value = "";
-    const result = await request("/api/accounts/connect", { method: "POST", body: payload });
+    const clientSecretFile = byId("connect-provider").value === "youtube" ? byId("client-secret-file").files[0] : null;
+    const path = clientSecretFile ? "/api/accounts/connect/file" : "/api/accounts/connect";
+    const body = clientSecretFile ? new FormData() : JSON.stringify({
+      provider: byId("connect-provider").value, clientId: byId("client-id").value,
+      alias: byId("account-alias").value || null, clientSecret: null });
+    if (clientSecretFile) {
+      body.set("provider", byId("connect-provider").value); body.set("clientId", byId("client-id").value);
+      body.set("alias", byId("account-alias").value); body.set("clientSecretFile", clientSecretFile);
+    }
+    byId("client-secret-file").value = "";
+    const result = await request(path, { method: "POST", body });
     if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。完了後に更新してください。");
   } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
 });

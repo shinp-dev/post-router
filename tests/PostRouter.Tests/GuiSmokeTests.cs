@@ -173,7 +173,7 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain(clientSecret, body, StringComparison.Ordinal);
         Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
         var html = await setup.Client.GetStringAsync("/");
-        Assert.Contains("id=\"client-secret\" type=\"password\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"client-secret-file\" type=\"file\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain(clientSecret, html, StringComparison.Ordinal);
     }
 
@@ -198,7 +198,141 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain(clientSecret, body, StringComparison.Ordinal);
         Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
         var html = await setup.Client.GetStringAsync("/");
-        Assert.Contains("id=\"reconnect-client-secret\" type=\"password\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"reconnect-client-secret-file\" type=\"file\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task YouTube_secret_file_starts_oauth_without_echoing_secret_or_raw_file_errors()
+    {
+        const string secret = "gui-secret-file-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent("youtube"), "provider");
+        content.Add(new StringContent("desktop-client"), "clientId");
+        content.Add(new StringContent("youtube-main"), "alias");
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(secret + "\n")), "clientSecretFile", "secret.txt");
+        using var response = await setup.PostFormAsync("/api/accounts/connect/file", content);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("code_challenge_method=S256", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, await setup.Client.GetStringAsync("/"), StringComparison.Ordinal);
+
+        using var bad = new MultipartFormDataContent();
+        bad.Add(new StringContent("youtube"), "provider");
+        bad.Add(new StringContent("desktop-client"), "clientId");
+        bad.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(new string('s', 4097))), "clientSecretFile", "secret.txt");
+        using var rejected = await setup.PostFormAsync("/api/accounts/connect/file", bad);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        var error = await rejected.Content.ReadAsStringAsync();
+        Assert.Contains("invalid_input", error, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('s', 100), error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task YouTube_video_form_enqueues_private_mp4_with_canonical_options()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        var blob = await setup.Runtime.Store.PutAsync("auth-token", JsonSerializer.SerializeToUtf8Bytes(
+            new TokenMaterial("access", "refresh", DateTimeOffset.UtcNow.AddHours(1))));
+        var account = await setup.Runtime.Store.SaveConnectedAccountAsync(new(
+            "youtube", "youtube-main", "channel-123", "Channel Name", "desktop-client",
+            "https://www.googleapis.com/auth/youtube.force-ssl", DateTimeOffset.UtcNow.AddHours(1), blob));
+        await setup.StartGuiAsync();
+
+        using var accounts = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/accounts"));
+        Assert.Contains(accounts.RootElement.EnumerateArray(), item =>
+            item.GetProperty("accountId").GetGuid() == account.AccountId && item.GetProperty("status").GetString() == "Connected");
+        var html = await setup.Client.GetStringAsync("/");
+        var script = await setup.Client.GetStringAsync("/app.js");
+        Assert.Contains("id=\"post-video\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"post-title\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"post-made-for-kids\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"post-upload-notice\"", html, StringComparison.Ordinal);
+        Assert.Contains("contentKinds.some", script, StringComparison.Ordinal);
+        Assert.Contains("contentKinds.includes(\"TextOnly\")", script, StringComparison.Ordinal);
+        Assert.Contains("/api/posts/video", script, StringComparison.Ordinal);
+        Assert.Contains("/api/posts/images", script, StringComparison.Ordinal);
+
+        using var accepted = await PostVideoAsync(setup, account.AccountId);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var acceptedJson = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync());
+        var postId = acceptedJson.RootElement.GetProperty("postId").GetGuid();
+        await using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(setup.Directory, "post-router.db")}");
+        await db.OpenAsync();
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+SELECT content.kind,content.text,content.title,target.visibility,target.options_schema,target.options_json
+FROM posts post JOIN contents content ON content.id=post.content_id
+JOIN targets target ON target.post_id=post.id WHERE post.id=$id
+""";
+        command.Parameters.AddWithValue("$id", postId.ToString("D"));
+        await using var row = await command.ExecuteReaderAsync();
+        Assert.True(await row.ReadAsync());
+        Assert.Equal("Video", row.GetString(0));
+        Assert.Equal("video description", row.GetString(1));
+        Assert.Equal("GUI video title", row.GetString(2));
+        Assert.Equal("private", row.GetString(3));
+        Assert.Equal("youtube-options/v1", row.GetString(4));
+        using var options = JsonDocument.Parse(row.GetString(5));
+        Assert.False(options.RootElement.GetProperty("madeForKids").GetBoolean());
+        Assert.True(options.RootElement.GetProperty("containsSyntheticMedia").GetBoolean());
+        Assert.True(options.RootElement.GetProperty("uploadNoticeAcknowledged").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(false, "GUI video title", "false", true)]
+    [InlineData(true, "", "false", true)]
+    [InlineData(true, "GUI video title", null, true)]
+    [InlineData(true, "GUI video title", "false", false)]
+    public async Task YouTube_video_form_requires_mp4_title_kids_and_upload_notice(
+        bool includeVideo, string title, string? madeForKids, bool acknowledged)
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        var blob = await setup.Runtime.Store.PutAsync("auth-token", JsonSerializer.SerializeToUtf8Bytes(
+            new TokenMaterial("access", "refresh", DateTimeOffset.UtcNow.AddHours(1))));
+        var account = await setup.Runtime.Store.SaveConnectedAccountAsync(new(
+            "youtube", "youtube-main", "channel-123", "Channel Name", "desktop-client",
+            "https://www.googleapis.com/auth/youtube.force-ssl", DateTimeOffset.UtcNow.AddHours(1), blob));
+        await setup.StartGuiAsync();
+        using var response = await PostVideoAsync(setup, account.AccountId, includeVideo, title, madeForKids, acknowledged);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("invalid_input", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task YouTube_video_title_uses_provider_unicode_scalar_validation()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        var blob = await setup.Runtime.Store.PutAsync("auth-token", JsonSerializer.SerializeToUtf8Bytes(
+            new TokenMaterial("access", "refresh", DateTimeOffset.UtcNow.AddHours(1))));
+        var account = await setup.Runtime.Store.SaveConnectedAccountAsync(new(
+            "youtube", "youtube-main", "channel-123", "Channel Name", "desktop-client",
+            "https://www.googleapis.com/auth/youtube.force-ssl", DateTimeOffset.UtcNow.AddHours(1), blob));
+        await setup.StartGuiAsync();
+        using var accepted = await PostVideoAsync(setup, account.AccountId, title: string.Concat(Enumerable.Repeat("😀", 100)));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var rejected = await PostVideoAsync(setup, account.AccountId, title: string.Concat(Enumerable.Repeat("😀", 101)));
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+    }
+
+    private static async Task<HttpResponseMessage> PostVideoAsync(GuiTestSetup setup, Guid accountId,
+        bool includeVideo = true, string title = "GUI video title", string? madeForKids = "false", bool acknowledged = true)
+    {
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(accountId.ToString("D")), "accountId");
+        content.Add(new StringContent(title), "title");
+        content.Add(new StringContent("video description"), "description");
+        if (madeForKids is not null) content.Add(new StringContent(madeForKids), "madeForKids");
+        content.Add(new StringContent("true"), "containsSyntheticMedia");
+        content.Add(new StringContent(acknowledged ? "true" : "false"), "uploadNoticeAcknowledged");
+        content.Add(new StringContent("private"), "visibility");
+        content.Add(new StringContent($"gui-video-{Guid.NewGuid():N}"), "clientRequestId");
+        if (includeVideo) content.Add(new ByteArrayContent([0, 0, 0, 0, (byte)'f', (byte)'t', (byte)'y', (byte)'p', 0, 0, 0, 0]),
+            "video", "test.mp4");
+        return await setup.PostFormAsync("/api/posts/video", content);
     }
 
     [Fact]
@@ -271,6 +405,14 @@ public sealed class GuiSmokeTests
             {
                 Content = JsonContent.Create(value),
             };
+            request.Headers.Add("Origin", Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+            request.Headers.Add("X-Post-Router-CSRF", CsrfToken);
+            return await Client.SendAsync(request);
+        }
+
+        public async Task<HttpResponseMessage> PostFormAsync(string path, MultipartFormDataContent content)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = content };
             request.Headers.Add("Origin", Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
             request.Headers.Add("X-Post-Router-CSRF", CsrfToken);
             return await Client.SendAsync(request);

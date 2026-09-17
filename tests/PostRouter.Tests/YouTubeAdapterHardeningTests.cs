@@ -87,14 +87,16 @@ public sealed class YouTubeAdapterHardeningTests
         Assert.Equal("youtube_upload_session_expired_after_ambiguous_send", result.SafeError);
     }
 
-    [Fact]
-    public async Task Private_completion_rechecks_remote_visibility()
+    [Theory]
+    [InlineData("public")]
+    [InlineData("unlisted")]
+    public async Task Private_completion_rechecks_remote_visibility(string privacy)
     {
         await using var context = await TestContext.CreateAsync();
         using var http = Client((request, _, _) =>
         {
             Assert.Equal(HttpMethod.Get, request.Method);
-            return Task.FromResult(Processed("video-private-check", "public"));
+            return Task.FromResult(Processed("video-private-check", privacy));
         });
         var setup = await BuildAsync(context, http);
         var checkpoint = new YouTubeCheckpoint(
@@ -103,13 +105,64 @@ public sealed class YouTubeAdapterHardeningTests
             Status: new YouTubeStatusSnapshot("private", true, "youtube", true, false, null),
             StatusCheckedAt: context.Time.GetUtcNow().AddMinutes(-2));
         var plan = Plan(setup.Account.AccountId, checkpoint) with { Operation = "finish-private", Visibility = "private" };
-        var step = Step("youtube.finish-private.v1", plan, context.Time.GetUtcNow(), StepEffect.ReadOnly, ReplaySafety.SafeRead);
+        var step = Step("youtube.finish-private.v1", plan, context.Time.GetUtcNow(), StepEffect.ConfirmPrivate, ReplaySafety.SafeRead);
 
         var result = await setup.Adapter.ExecuteStepAsync(step, CancellationToken.None);
 
         Assert.Equal(StepOutcome.Rejected, result.Outcome);
         Assert.Equal(PublicationState.NeedsAttention, result.ObservedState);
         Assert.Equal("youtube_private_visibility_mismatch", result.SafeError);
+    }
+
+    [Fact]
+    public async Task Private_completion_rejects_remote_native_schedule()
+    {
+        await using var context = await TestContext.CreateAsync();
+        using var http = Client((request, _, _) =>
+        {
+            Assert.Equal(HttpMethod.Get, request.Method);
+            return Task.FromResult(ProcessedWithPublishAt(
+                "video-private-scheduled", "private", context.Time.GetUtcNow().AddHours(2)));
+        });
+        var setup = await BuildAsync(context, http);
+        var checkpoint = new YouTubeCheckpoint(VideoId: "video-private-scheduled", Stage: "ready",
+            Status: new YouTubeStatusSnapshot("private", true, "youtube", true, false, null),
+            StatusCheckedAt: context.Time.GetUtcNow());
+        var plan = Plan(setup.Account.AccountId, checkpoint) with { Operation = "finish-private", Visibility = "private" };
+        var step = Step("youtube.finish-private.v1", plan, context.Time.GetUtcNow(), StepEffect.ConfirmPrivate, ReplaySafety.SafeRead);
+
+        var result = await setup.Adapter.ExecuteStepAsync(step, CancellationToken.None);
+
+        Assert.Equal(StepOutcome.Rejected, result.Outcome);
+        Assert.Equal(PublicationState.NeedsAttention, result.ObservedState);
+        Assert.Equal("youtube_native_schedule_present", result.SafeError);
+    }
+
+    [Theory]
+    [InlineData("public")]
+    [InlineData("unlisted")]
+    public async Task Public_visibility_still_plans_a_publish_boundary_from_ready(string visibility)
+    {
+        await using var context = await TestContext.CreateAsync();
+        using var http = Client((_, _, _) => Task.FromResult(Json(HttpStatusCode.OK, "{}")));
+        var setup = await BuildAsync(context, http);
+        var checkpoint = new YouTubeCheckpoint(VideoId: "known-video", Stage: "ready",
+            Status: new YouTubeStatusSnapshot(visibility, true, "youtube", true, false, null),
+            StatusCheckedAt: context.Time.GetUtcNow());
+        var asset = new MediaAsset(Guid.NewGuid(), "sha", 6, "video/mp4", "unused.mp4");
+        var content = new Content(Guid.NewGuid(), ContentKind.Video, "description", "title", [asset]);
+        var target = new TargetIntent(setup.Account.AccountId, "youtube", visibility, "youtube-options/v1", 1,
+            "{\"madeForKids\":false,\"uploadNoticeAcknowledged\":true}", "youtube-hardening", ApprovalPolicy.RequireApproval);
+        var publication = new Publication(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), setup.Account.AccountId,
+            "youtube", PublicationState.Ready, ExecutionMode.Local, context.Time.GetUtcNow(), TimeSpan.FromMinutes(15),
+            context.Time.GetUtcNow());
+
+        var step = await setup.Adapter.PlanNextStepAsync(new(publication, content, target), JsonSerializer.Serialize(checkpoint),
+            CancellationToken.None);
+
+        Assert.Equal("youtube.publish.v1", step.StepKey);
+        Assert.Equal(StepEffect.MayPublish, step.Effect);
+        Assert.False(PublicationStateMachine.CanTransition(PublicationState.Ready, PublicationState.Published));
     }
 
     [Fact]

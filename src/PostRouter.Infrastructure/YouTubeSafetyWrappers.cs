@@ -345,7 +345,7 @@ internal sealed class YouTubeResumeSafeAdapter : IProviderAdapter
         }
 
         var snapshot = new YouTubeStatusSnapshot(
-            observed.Status.PrivacyStatus ?? "private",
+            observed.Status.PrivacyStatus ?? string.Empty,
             observed.Status.Embeddable,
             observed.Status.License,
             observed.Status.PublicStatsViewable,

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PostRouter.Domain;
 
 namespace PostRouter.Application;
@@ -64,6 +65,35 @@ public sealed class OperationsService(
         if (request.Images.Count is < 1 or > 4) throw new ArgumentException("Image posts require one to four images.");
         return await EnqueueAsync(request.AccountId, request.Text, request.Images, ContentKind.ImageSet,
             request.PublishAt, request.ClientRequestId, approvalPolicy, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EnqueueResult> EnqueueVideoAsync(CreateVideoPostRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.Video.DetectedMime != "video/mp4") throw new ArgumentException("Video must be MP4.");
+        if (request.MadeForKids is null) throw new ArgumentException("Made for Kids must be selected.");
+        if (!request.UploadNoticeAcknowledged) throw new ArgumentException("YouTube upload notice must be acknowledged.");
+        if (request.Visibility != "private") throw new ArgumentException("GUI video visibility must be private.");
+        var accounts = await posts.AccountsAsync(cancellationToken).ConfigureAwait(false);
+        var account = accounts.SingleOrDefault(candidate => candidate.Id == request.AccountId)
+            ?? throw new KeyNotFoundException("Account not found.");
+        var adapter = providers.GetRequired(account.ProviderKey);
+        var capability = adapter.Capabilities;
+        if (account.ProviderKey != "youtube" || !capability.ContentKinds.Contains(ContentKind.Video) ||
+            !capability.Visibilities.Contains("private") || capability.OptionsSchema != "youtube-options/v1" ||
+            capability.OptionsVersion != 1)
+            throw new NotSupportedException("The selected provider does not support private YouTube video.");
+        var target = new TargetIntent(account.Id, account.ProviderKey, "private", capability.OptionsSchema,
+            capability.OptionsVersion, JsonSerializer.Serialize(new
+            {
+                madeForKids = request.MadeForKids.Value,
+                containsSyntheticMedia = request.ContainsSyntheticMedia,
+                uploadNoticeAcknowledged = true,
+            }), account.Alias);
+        var intent = new CanonicalPostIntent(
+            string.IsNullOrWhiteSpace(request.ClientRequestId) ? $"gui-{Guid.NewGuid():N}" : request.ClientRequestId,
+            new Content(Guid.NewGuid(), ContentKind.Video, request.Description, request.Title, [request.Video]),
+            [target], new ScheduleIntent(ScheduleMode.Immediate, timeProvider.GetUtcNow(), TimeSpan.FromMinutes(15)));
+        return await posts.EnqueueAsync(intent, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<EnqueueResult> EnqueueAsync(Guid accountId, string text, IReadOnlyList<MediaAsset> media,

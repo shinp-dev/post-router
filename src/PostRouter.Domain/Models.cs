@@ -13,7 +13,7 @@ public enum JobState { Queued, Claimed, Done, Blocked, Cancelled }
 public enum JobKind { Publish, Prepare, Poll, Reconcile, Delete, Refresh, StatsCollect, Purge }
 public enum JobOwnerType { Publication, AuthGrant, StatsSyncRun, DataDeletion }
 public enum DispatchState { Prepared, ReceiptCommitted }
-public enum StepEffect { ReadOnly, UploadOnly, CreateRemoteObject, MayPublish, UpdateExisting, DeleteExisting }
+public enum StepEffect { ReadOnly, UploadOnly, CreateRemoteObject, MayPublish, UpdateExisting, DeleteExisting, ConfirmPrivate }
 public enum ReplaySafety { SafeRead, SafeRepeatNoPublication, ResumeKnownHandle, IdempotentExistingObject, NotReplayable }
 public enum EffectCertainty { NotSent, NoSideEffect, Confirmed, Ambiguous }
 public enum StepOutcome { Completed, Pending, Rejected, Ambiguous }

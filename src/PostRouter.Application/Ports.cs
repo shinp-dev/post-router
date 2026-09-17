@@ -57,6 +57,10 @@ public sealed record CreateTextPostRequest(
 public sealed record CreateImagePostRequest(
     Guid AccountId, string Text, IReadOnlyList<MediaAsset> Images,
     DateTimeOffset? PublishAt = null, string? ClientRequestId = null);
+public sealed record CreateVideoPostRequest(
+    Guid AccountId, string Title, string? Description, MediaAsset Video,
+    bool? MadeForKids, bool ContainsSyntheticMedia, string Visibility,
+    bool UploadNoticeAcknowledged, string? ClientRequestId = null);
 public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
 {
     public string SafeCode { get; } = safeCode;
