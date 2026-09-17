@@ -31,22 +31,40 @@ internal sealed class YouTubeApiClient(HttpClient httpClient, TimeProvider timeP
         string code,
         string verifier,
         CancellationToken cancellationToken) =>
-        SendTokenAsync(new Dictionary<string, string>
+        ExchangeCodeAsync(clientId, redirectUri, code, verifier, null, cancellationToken);
+
+    public Task<YouTubeTokenResponse> ExchangeCodeAsync(
+        string clientId,
+        Uri redirectUri,
+        string code,
+        string verifier,
+        string? clientSecret,
+        CancellationToken cancellationToken) =>
+        SendTokenAsync(WithClientSecret(new Dictionary<string, string>
         {
             ["code"] = code,
             ["client_id"] = clientId,
             ["redirect_uri"] = redirectUri.AbsoluteUri,
             ["grant_type"] = "authorization_code",
             ["code_verifier"] = verifier,
-        }, cancellationToken);
+        }, clientSecret), cancellationToken);
 
     public Task<YouTubeTokenResponse> RefreshAsync(string clientId, string refreshToken, CancellationToken cancellationToken) =>
-        SendTokenAsync(new Dictionary<string, string>
+        RefreshAsync(clientId, refreshToken, null, cancellationToken);
+
+    public Task<YouTubeTokenResponse> RefreshAsync(string clientId, string refreshToken, string? clientSecret, CancellationToken cancellationToken) =>
+        SendTokenAsync(WithClientSecret(new Dictionary<string, string>
         {
             ["client_id"] = clientId,
             ["refresh_token"] = refreshToken,
             ["grant_type"] = "refresh_token",
-        }, cancellationToken);
+        }, clientSecret), cancellationToken);
+
+    private static Dictionary<string, string> WithClientSecret(Dictionary<string, string> fields, string? clientSecret)
+    {
+        if (!string.IsNullOrEmpty(clientSecret)) fields["client_secret"] = clientSecret;
+        return fields;
+    }
 
     public async Task RevokeAsync(string token, CancellationToken cancellationToken)
     {
@@ -557,27 +575,28 @@ internal sealed class YouTubeAuthProvider(YouTubeApiClient client, TimeProvider 
         AuthorizationSession session,
         string code,
         string returnedState,
+        string? clientSecret,
         CancellationToken cancellationToken)
     {
         if (!FixedEquals(session.State, returnedState)) throw new InvalidOperationException("oauth_state_mismatch");
         ArgumentException.ThrowIfNullOrWhiteSpace(code);
-        var token = await client.ExchangeCodeAsync(session.ClientId, session.RedirectUri, code, session.CodeVerifier, cancellationToken).ConfigureAwait(false);
+        var token = await client.ExchangeCodeAsync(session.ClientId, session.RedirectUri, code, session.CodeVerifier, clientSecret, cancellationToken).ConfigureAwait(false);
         var scope = string.IsNullOrWhiteSpace(token.Scope) ? session.Scope : token.Scope;
         if (!scope.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(RequiredScope, StringComparer.Ordinal))
             throw new InvalidOperationException("oauth_scope_missing");
         if (string.IsNullOrWhiteSpace(token.RefreshToken)) throw new InvalidOperationException("oauth_refresh_token_missing");
         var channel = await client.GetCurrentChannelAsync(token.AccessToken, cancellationToken).ConfigureAwait(false);
         return new(channel.Id, channel.Snippet?.Title ?? channel.Id, scope,
-            new TokenMaterial(token.AccessToken, token.RefreshToken, timeProvider.GetUtcNow().AddSeconds(token.ExpiresIn)));
+            new TokenMaterial(token.AccessToken, token.RefreshToken, timeProvider.GetUtcNow().AddSeconds(token.ExpiresIn), clientSecret));
     }
 
     public async Task<RefreshResult> RefreshAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(grant.ClientId) || string.IsNullOrWhiteSpace(current.RefreshToken))
             throw new YouTubeProviderException("youtube_reconnect_required", false);
-        var token = await client.RefreshAsync(grant.ClientId, current.RefreshToken, cancellationToken).ConfigureAwait(false);
+        var token = await client.RefreshAsync(grant.ClientId, current.RefreshToken, current.ClientSecret, cancellationToken).ConfigureAwait(false);
         return new(new TokenMaterial(token.AccessToken, token.RefreshToken ?? current.RefreshToken,
-            timeProvider.GetUtcNow().AddSeconds(token.ExpiresIn)), "youtube-token-refresh");
+            timeProvider.GetUtcNow().AddSeconds(token.ExpiresIn), current.ClientSecret), "youtube-token-refresh");
     }
 
     public Task RevokeAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken) =>

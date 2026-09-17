@@ -210,17 +210,25 @@ public static class GuiApplication
 
         app.MapPost("/api/accounts/connect", (ConnectRequest request, HttpContext context) =>
         {
+            if (request.ClientSecret is not null && !string.Equals(request.Provider, "youtube", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Client secret is supported only for YouTube.");
+            if (request.ClientSecret is not null && string.IsNullOrWhiteSpace(request.ClientSecret))
+                throw new ArgumentException("Client secret must not be blank.");
             var callback = CallbackUri(context.Request);
             var session = runtime.Accounts.BeginConnect(request.Provider, request.ClientId, callback, request.Alias);
             RemoveExpired(authorizations);
-            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5));
+            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), request.ClientSecret);
             return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
         });
-        app.MapPost("/api/accounts/{accountId:guid}/reconnect", async (Guid accountId, HttpContext context, CancellationToken token) =>
+        app.MapPost("/api/accounts/{accountId:guid}/reconnect", async (Guid accountId, ReconnectRequest request, HttpContext context, CancellationToken token) =>
         {
             var session = await runtime.Accounts.BeginReconnectAsync(accountId, CallbackUri(context.Request), token).ConfigureAwait(false);
+            if (request.ClientSecret is not null && !string.Equals(session.Provider, "youtube", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Client secret is supported only for YouTube.");
+            if (request.ClientSecret is not null && string.IsNullOrWhiteSpace(request.ClientSecret))
+                throw new ArgumentException("Client secret must not be blank.");
             RemoveExpired(authorizations);
-            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5));
+            authorizations[session.State] = new(session, DateTimeOffset.UtcNow.AddMinutes(5), request.ClientSecret);
             return Results.Json(new { authorizationUrl = session.AuthorizationUri.AbsoluteUri, expiresInSeconds = 300 });
         });
         app.MapPost("/api/accounts/{accountId:guid}/disconnect", async (Guid accountId, CancellationToken token) =>
@@ -241,13 +249,12 @@ public static class GuiApplication
                 return Results.Content(OAuthFailurePage(null), "text/html; charset=utf-8", Encoding.UTF8, StatusCodes.Status400BadRequest);
             try
             {
-                _ = await runtime.Accounts.CompleteConnectAsync(pending.Session, code, state, token).ConfigureAwait(false);
+                _ = await runtime.Accounts.CompleteConnectAsync(pending.Session, code, state, pending.ClientSecret, token).ConfigureAwait(false);
                 return Results.Content(OAuthSuccessPage(), "text/html; charset=utf-8");
             }
             catch (Exception ex)
             {
-                var safeCode = OAuthErrorCode(ex);
-                Console.Error.WriteLine($"OAuth callback failed: {ex.GetType().Name} ({safeCode}).");
+                Console.Error.WriteLine(OAuthFailureLog(ex));
                 return Results.Content(OAuthFailurePage(ex), "text/html; charset=utf-8", Encoding.UTF8, StatusCodes.Status400BadRequest);
             }
         });
@@ -333,10 +340,23 @@ public static class GuiApplication
     internal static string OAuthFailurePage(Exception? exception) =>
         $"<!doctype html><html lang=en><meta charset=utf-8><title>post-router</title><body><h1>Connection failed</h1><p>Error code: <code>{WebUtility.HtmlEncode(OAuthErrorCode(exception))}</code></p><p>The account was not connected. You may close this window.</p></body></html>";
 
+    internal static string OAuthFailureLog(Exception exception) =>
+        $"OAuth callback failed: {exception.GetType().Name} ({OAuthErrorCode(exception)}).";
+
     internal static string OAuthSuccessPage() =>
         "<!doctype html><html lang=en><meta charset=utf-8><title>post-router</title><body><h1>Connected</h1><p>The account is connected. You may close this window.</p></body></html>";
 
-    private sealed record PendingAuthorization(AuthorizationSession Session, DateTimeOffset ExpiresAt);
-    private sealed record ConnectRequest(string Provider, string ClientId, string? Alias);
+    private sealed record PendingAuthorization(AuthorizationSession Session, DateTimeOffset ExpiresAt, string? ClientSecret)
+    {
+        public override string ToString() => "[REDACTED PENDING AUTHORIZATION]";
+    }
+    private sealed record ConnectRequest(string Provider, string ClientId, string? Alias, string? ClientSecret)
+    {
+        public override string ToString() => "[REDACTED CONNECT REQUEST]";
+    }
+    private sealed record ReconnectRequest(string? ClientSecret)
+    {
+        public override string ToString() => "[REDACTED RECONNECT REQUEST]";
+    }
     private sealed record GuiError(string Code, string Message);
 }

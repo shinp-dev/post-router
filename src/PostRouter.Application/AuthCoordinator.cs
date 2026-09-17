@@ -79,10 +79,26 @@ public sealed class AccountConnectionService(
         return provider.BeginAuthorization(connection.ClientId, redirectUri, accountId, connection.RemoteSubject, connection.Alias);
     }
 
-    public async Task<AccountConnection> CompleteConnectAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken = default)
+    public Task<AccountConnection> CompleteConnectAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken = default) =>
+        CompleteConnectAsync(session, code, returnedState, null, cancellationToken);
+
+    public async Task<AccountConnection> CompleteConnectAsync(AuthorizationSession session, string code, string returnedState, string? clientSecret, CancellationToken cancellationToken = default)
     {
         var provider = GetProvider(session.Provider);
-        var identity = await provider.CompleteAuthorizationAsync(session, code, returnedState, cancellationToken).ConfigureAwait(false);
+        if (clientSecret is not null && string.IsNullOrWhiteSpace(clientSecret))
+            throw new ArgumentException("Client secret must not be blank.");
+        if (clientSecret is null && session.ExpectedAccountId is { } reconnectAccountId &&
+            string.Equals(session.Provider, "youtube", StringComparison.Ordinal))
+        {
+            var previous = await store.GetAuthGrantForAccountAsync(reconnectAccountId, cancellationToken).ConfigureAwait(false);
+            if (previous is not null)
+            {
+                var previousBytes = await vault.GetAsync(previous.VaultBlobId, "auth-token", cancellationToken).ConfigureAwait(false);
+                try { clientSecret = JsonSerializer.Deserialize<TokenMaterial>(previousBytes)?.ClientSecret; }
+                finally { CryptographicOperations.ZeroMemory(previousBytes); }
+            }
+        }
+        var identity = await provider.CompleteAuthorizationAsync(session, code, returnedState, clientSecret, cancellationToken).ConfigureAwait(false);
         if (session.ExpectedSubject is not null && !string.Equals(session.ExpectedSubject, identity.RemoteSubject, StringComparison.Ordinal))
             throw new InvalidOperationException("reconnect_account_mismatch");
 

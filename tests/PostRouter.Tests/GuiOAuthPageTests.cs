@@ -48,6 +48,16 @@ public sealed class GuiOAuthPageTests
     }
 
     [Fact]
+    public void Failure_log_excludes_client_secret_and_exception_message()
+    {
+        var failure = new InvalidOperationException("client-secret-marker authorization-code-marker");
+        var log = GuiApplication.OAuthFailureLog(failure);
+        Assert.Contains("InvalidOperationException (connection_failed)", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("client-secret-marker", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("authorization-code-marker", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Invalid_provider_safe_code_uses_generic_code()
     {
         var html = GuiApplication.OAuthFailurePage(new ProviderOperationException("<script>secret</script>", false));

@@ -86,6 +86,25 @@ public sealed class YouTubeTokenFailureTests
         Assert.DoesNotContain("secret-refresh-token", failure.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Configured_client_secret_is_absent_from_token_failure_page_and_log()
+    {
+        const string clientSecret = "oauth-client-secret-marker";
+        using var http = Client(HttpStatusCode.BadRequest,
+            "{\"error\":\"invalid_request\",\"error_description\":\"oauth-client-secret-marker is missing\"}");
+        var client = new YouTubeApiClient(http, TimeProvider.System);
+
+        var failure = await Assert.ThrowsAsync<YouTubeProviderException>(() =>
+            client.ExchangeCodeAsync("desktop-client", new Uri("http://127.0.0.1:8765/callback"),
+                "authorization-code-marker", "verifier-marker", clientSecret, CancellationToken.None));
+
+        var visible = failure + GuiApplication.OAuthFailurePage(failure) + GuiApplication.OAuthFailureLog(failure);
+        Assert.Contains("youtube_oauth_invalid_request", visible, StringComparison.Ordinal);
+        Assert.DoesNotContain(clientSecret, visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("authorization-code-marker", visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("verifier-marker", visible, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.TooManyRequests)]
     [InlineData(HttpStatusCode.InternalServerError)]

@@ -273,7 +273,7 @@ internal sealed class XAuthProvider(XApiClient client, TimeProvider timeProvider
             RequiredScope, expectedAccountId, expectedSubject, requestedAlias);
     }
 
-    public async Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, CancellationToken cancellationToken)
+    public async Task<ConnectedIdentity> CompleteAuthorizationAsync(AuthorizationSession session, string code, string returnedState, string? clientSecret, CancellationToken cancellationToken)
     {
         if (!FixedEquals(session.State, returnedState)) throw new InvalidOperationException("oauth_state_mismatch");
         ArgumentException.ThrowIfNullOrWhiteSpace(code);

@@ -51,12 +51,22 @@
         <h2 class="wide">Providerへ接続</h2>
         <label>Provider<select id="connect-provider"></select></label>
         <label>Client ID<input id="client-id" autocomplete="off" required></label>
+        <label id="client-secret-field" hidden>Client secret (YouTube, optional)<input id="client-secret" type="password" autocomplete="off" spellcheck="false"></label>
         <label>表示用alias<input id="account-alias" autocomplete="off"></label>
         <div class="actions"><button type="submit">認証を開始</button></div>
         <p class="wide hint">認証画面は別タブで開きます。tokenやclient secretはブラウザへ保存しません。</p>
       </form>
       <div id="account-list" class="cards"></div>
     </section>
+
+    <dialog id="reconnect-dialog">
+      <form id="reconnect-form">
+        <h2>YouTube再接続</h2>
+        <p class="hint">Client secretがvaultから削除されている場合は、ここで再入力してください。</p>
+        <label>Client secret (optional)<input id="reconnect-client-secret" type="password" autocomplete="off" spellcheck="false"></label>
+        <div class="actions"><button id="reconnect-cancel" type="button" class="secondary">キャンセル</button><button type="submit">認証を開始</button></div>
+      </form>
+    </dialog>
 
     <dialog id="detail-dialog">
       <div class="dialog-head"><h2>投稿詳細</h2><button id="detail-close" class="icon" aria-label="閉じる">×</button></div>

@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using PostRouter.Application;
 using PostRouter.Domain;
 using PostRouter.Infrastructure;
@@ -22,6 +23,7 @@ public sealed class YouTubeProviderTests
                 Assert.Equal("/token", request.RequestUri?.AbsolutePath);
                 var form = await request.Content!.ReadAsStringAsync(cancellationToken);
                 Assert.Contains("code_verifier=", form);
+                Assert.DoesNotContain("client_secret=", form, StringComparison.Ordinal);
                 return Json(HttpStatusCode.OK,
                     "{\"access_token\":\"yt-access\",\"expires_in\":3600,\"refresh_token\":\"yt-refresh\",\"scope\":\"https://www.googleapis.com/auth/youtube.force-ssl\",\"token_type\":\"Bearer\"}");
             }
@@ -48,6 +50,115 @@ public sealed class YouTubeProviderTests
         Assert.Equal("Channel Name", connected.DisplayName);
         Assert.Equal("Connected", connected.Status);
         Assert.NotNull(await context.Store.GetAuthGrantForAccountAsync(connected.AccountId));
+    }
+
+    [Fact]
+    public async Task OAuth_secret_is_vaulted_and_reused_for_reconnect_and_refresh_with_pkce()
+    {
+        const string clientSecret = "desktop-secret-for-test";
+        await using var context = await TestContext.CreateAsync();
+        var calls = 0;
+        using var http = Client(async (request, call, cancellationToken) =>
+        {
+            calls = call;
+            if (call is 1 or 3 or 5 or 6)
+            {
+                Assert.Equal("oauth2.googleapis.com", request.RequestUri?.Host);
+                var form = await request.Content!.ReadAsStringAsync(cancellationToken);
+                Assert.Contains("client_secret=desktop-secret-for-test", form, StringComparison.Ordinal);
+                if (call == 5)
+                {
+                    Assert.Contains("grant_type=refresh_token", form, StringComparison.Ordinal);
+                    Assert.DoesNotContain("code_verifier=", form, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.Contains("grant_type=authorization_code", form, StringComparison.Ordinal);
+                    Assert.Contains("code_verifier=", form, StringComparison.Ordinal);
+                }
+                return Json(HttpStatusCode.OK,
+                    "{\"access_token\":\"yt-access\",\"expires_in\":3600,\"refresh_token\":\"yt-refresh\",\"scope\":\"https://www.googleapis.com/auth/youtube.force-ssl\"}");
+            }
+            Assert.Equal("/youtube/v3/channels", request.RequestUri?.AbsolutePath);
+            return Json(HttpStatusCode.OK, "{\"items\":[{\"id\":\"channel-123\",\"snippet\":{\"title\":\"Channel Name\"}}]}");
+        });
+        var client = new YouTubeApiClient(http, context.Time);
+        var provider = new YouTubeAuthProvider(client, context.Time);
+        var auth = new AuthCoordinator(context.Store, context.Store,
+            new FileAuthGrantLockFactory(Path.Combine(context.Directory, "yt-secret-auth-locks")), context.Gate, [provider], context.Time);
+        var accounts = new AccountConnectionService(context.Store, context.Store, context.Gate,
+            new NoOpAccountOperationLockFactory(), [provider], auth);
+
+        var session = accounts.BeginConnect("youtube", "desktop-client", new Uri("http://127.0.0.1:9876/callback"), "yt-main");
+        Assert.DoesNotContain(clientSecret, session.AuthorizationUri.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains("code_challenge_method=S256", session.AuthorizationUri.Query, StringComparison.Ordinal);
+        var connected = await accounts.CompleteConnectAsync(session, "authorization-code", session.State, clientSecret);
+        Assert.DoesNotContain(clientSecret, JsonSerializer.Serialize(connected), StringComparison.Ordinal);
+        var grant = (await context.Store.GetAuthGrantForAccountAsync(connected.AccountId))!;
+        var stored = await context.Store.GetAsync(grant.VaultBlobId, "auth-token");
+        try { Assert.Equal(clientSecret, JsonSerializer.Deserialize<TokenMaterial>(stored)?.ClientSecret); }
+        finally { CryptographicOperations.ZeroMemory(stored); }
+        await using (var database = new SqliteConnection($"Data Source={Path.Combine(context.Directory, "post-router.db")}"))
+        {
+            await database.OpenAsync();
+            await using var command = database.CreateCommand();
+            command.CommandText = "SELECT ciphertext FROM vault_blobs WHERE id=$id";
+            command.Parameters.AddWithValue("$id", grant.VaultBlobId);
+            var ciphertext = Assert.IsType<byte[]>(await command.ExecuteScalarAsync());
+            Assert.DoesNotContain(clientSecret, Encoding.UTF8.GetString(ciphertext), StringComparison.Ordinal);
+        }
+
+        var reconnect = await accounts.BeginReconnectAsync(connected.AccountId, new Uri("http://127.0.0.1:9876/callback"));
+        Assert.DoesNotContain(clientSecret, reconnect.AuthorizationUri.AbsoluteUri, StringComparison.Ordinal);
+        var reconnected = await accounts.CompleteConnectAsync(reconnect, "second-code", reconnect.State);
+        Assert.Equal(connected.AccountId, reconnected.AccountId);
+
+        context.Time.Advance(TimeSpan.FromHours(2));
+        grant = (await context.Store.GetAuthGrantForAccountAsync(connected.AccountId))!;
+        _ = await auth.RefreshAsync(grant.Id);
+        var refreshed = (await context.Store.GetAuthGrantForAccountAsync(connected.AccountId))!;
+        var refreshedBytes = await context.Store.GetAsync(refreshed.VaultBlobId, "auth-token");
+        try { Assert.Equal(clientSecret, JsonSerializer.Deserialize<TokenMaterial>(refreshedBytes)?.ClientSecret); }
+        finally { CryptographicOperations.ZeroMemory(refreshedBytes); }
+
+        Assert.True(await accounts.DisconnectAsync(connected.AccountId));
+        var disconnectedReconnect = await accounts.BeginReconnectAsync(connected.AccountId, new Uri("http://127.0.0.1:9876/callback"));
+        var restored = await accounts.CompleteConnectAsync(disconnectedReconnect, "third-code", disconnectedReconnect.State, clientSecret);
+        Assert.Equal(connected.AccountId, restored.AccountId);
+        var restoredGrant = (await context.Store.GetAuthGrantForAccountAsync(restored.AccountId))!;
+        var restoredBytes = await context.Store.GetAsync(restoredGrant.VaultBlobId, "auth-token");
+        try { Assert.Equal(clientSecret, JsonSerializer.Deserialize<TokenMaterial>(restoredBytes)?.ClientSecret); }
+        finally { CryptographicOperations.ZeroMemory(restoredBytes); }
+        Assert.Equal(7, calls);
+    }
+
+    [Fact]
+    public async Task Refresh_without_client_secret_omits_optional_form_field()
+    {
+        using var http = Client(async (request, _, cancellationToken) =>
+        {
+            var form = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Assert.Contains("grant_type=refresh_token", form, StringComparison.Ordinal);
+            Assert.DoesNotContain("client_secret=", form, StringComparison.Ordinal);
+            return Json(HttpStatusCode.OK, "{\"access_token\":\"yt-access\",\"expires_in\":3600}");
+        });
+        var client = new YouTubeApiClient(http, TimeProvider.System);
+
+        _ = await client.RefreshAsync("desktop-client", "refresh-token", CancellationToken.None);
+    }
+
+    [Fact]
+    public void Existing_vault_material_without_client_secret_remains_readable()
+    {
+        var legacy = JsonSerializer.Serialize(new
+        {
+            AccessToken = "access",
+            RefreshToken = "refresh",
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
+        });
+        var material = JsonSerializer.Deserialize<TokenMaterial>(legacy);
+        Assert.NotNull(material);
+        Assert.Null(material.ClientSecret);
     }
 
     [Fact]
