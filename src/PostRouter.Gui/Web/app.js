@@ -3,6 +3,7 @@
 let csrfToken = "";
 let accounts = [];
 let providers = [];
+let publicationItems = [];
 let pendingRequestId = crypto.randomUUID();
 let reconnectAccountId = null;
 
@@ -47,6 +48,7 @@ async function refreshAll() {
     ]);
     accounts = accountData;
     providers = providerData;
+    publicationItems = publications;
     renderDashboard(dashboard);
     renderAccounts();
     renderProviders();
@@ -125,10 +127,14 @@ function updatePostCapability() {
 
 function renderPublications(items) {
   const body = byId("publication-rows"); body.replaceChildren();
-  if (!items.length) {
-    const row = body.insertRow(); const cell = row.insertCell(); cell.colSpan = 6; cell.textContent = "投稿はまだありません。"; return;
+  const visible = byId("hide-published").checked
+    ? items.filter(item => item.publicationState !== "Published") : items;
+  if (!visible.length) {
+    const row = body.insertRow(); const cell = row.insertCell(); cell.colSpan = 6;
+    cell.textContent = items.length ? "表示する投稿はありません。" : "投稿はまだありません。";
+    return;
   }
-  items.forEach(item => {
+  visible.forEach(item => {
     const row = body.insertRow(); row.tabIndex = 0; row.dataset.publicationId = item.publicationId;
     const account = row.insertCell(); account.textContent = `${item.provider} / ${item.accountAlias}`;
     row.insertCell().textContent = item.contentPreview || "—";
@@ -262,6 +268,7 @@ byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").cl
 byId("schedule-enabled").addEventListener("change", event => { byId("schedule-field").hidden = !event.target.checked; byId("post-at").required = event.target.checked; });
 byId("post-text").addEventListener("input", event => { byId("text-count").textContent = `${[...event.target.value].length} / 280`; pendingRequestId = crypto.randomUUID(); });
 byId("post-account").addEventListener("change", updatePostCapability);
+byId("hide-published").addEventListener("change", () => renderPublications(publicationItems));
 byId("connect-provider").addEventListener("change", updateClientSecretField);
 byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret-file").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
 byId("reconnect-form").addEventListener("submit", event => {
