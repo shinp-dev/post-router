@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +15,87 @@ namespace PostRouter.Tests;
 
 public sealed class GuiSmokeTests
 {
+    [Fact]
+    public async Task Instagram_failed_flow_returns_safe_code_to_gui_and_console()
+    {
+        const string secret = "private-instagram-secret-marker";
+        const string code = "private-instagram-code-marker";
+        var lines = new ConcurrentQueue<string>();
+        InstagramCallbackListener? listener = null;
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync(createInstagramListener: () => listener = new InstagramCallbackListener(0),
+            writeSafeInstagramFailure: lines.Enqueue);
+        using var appId = await setup.PostAsync("/api/instagram/app-id", new { appId = "123456" });
+        Assert.Equal(HttpStatusCode.OK, appId.StatusCode);
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(secret)), "clientSecretFile", "instagram-secret.txt");
+        using var saved = await setup.PostFormAsync("/api/instagram/app-secret", form);
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        using var started = await setup.PostAsync("/api/instagram/connect", new { alias = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
+        using var startBody = JsonDocument.Parse(await started.Content.ReadAsStringAsync());
+        var flowId = startBody.RootElement.GetProperty("flowId").GetGuid();
+        Assert.NotNull(listener);
+        using var callback = new TcpClient();
+        await callback.ConnectAsync(IPAddress.Loopback, listener.Port);
+        await using var stream = callback.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(
+            $"GET /instagram/callback?code={code}&state=wrong HTTP/1.1\r\nHost: auth.shinp-studio.com\r\nConnection: close\r\n\r\n"));
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        var callbackPage = await reader.ReadToEndAsync();
+        Assert.Contains("400 Bad Request", callbackPage, StringComparison.Ordinal);
+        Assert.DoesNotContain(code, callbackPage, StringComparison.Ordinal);
+
+        string statusBody = "";
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            statusBody = await setup.Client.GetStringAsync($"/api/instagram/flows/{flowId:D}");
+            if (statusBody.Contains("\"state\":\"Failed\"", StringComparison.Ordinal)) break;
+            await Task.Delay(20);
+        }
+        using var status = JsonDocument.Parse(statusBody);
+        Assert.Equal("Failed", status.RootElement.GetProperty("state").GetString());
+        Assert.Equal("oauth_state_mismatch", status.RootElement.GetProperty("errorCode").GetString());
+        var latest = await setup.Client.GetStringAsync("/api/instagram/flows/latest");
+        Assert.Contains("\"errorCode\":\"oauth_state_mismatch\"", latest, StringComparison.Ordinal);
+        var consoleLine = Assert.Single(lines);
+        Assert.Equal("Instagram OAuth failed: oauth_state_mismatch", consoleLine);
+        foreach (var visible in new[] { statusBody, latest, consoleLine, callbackPage })
+        {
+            Assert.DoesNotContain(secret, visible, StringComparison.Ordinal);
+            Assert.DoesNotContain(code, visible, StringComparison.Ordinal);
+            Assert.DoesNotContain("?code=", visible, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Instagram_settings_api_keeps_app_secret_in_vault_and_out_of_responses()
+    {
+        const string secret = "instagram-gui-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        using var initial = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/instagram/settings"));
+        Assert.False(initial.RootElement.GetProperty("appSecretConfigured").GetBoolean());
+        using var configured = await setup.PostAsync("/api/instagram/app-id", new { appId = "123456" });
+        Assert.Equal(HttpStatusCode.OK, configured.StatusCode);
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(secret + "\n")), "clientSecretFile", "instagram-secret.txt");
+        using var saved = await setup.PostFormAsync("/api/instagram/app-secret", form);
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        var savedBody = await saved.Content.ReadAsStringAsync();
+        Assert.Contains("\"appSecretConfigured\":true", savedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, savedBody, StringComparison.Ordinal);
+        var settingsBody = await setup.Client.GetStringAsync("/api/instagram/settings");
+        Assert.DoesNotContain(secret, settingsBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, await File.ReadAllTextAsync(Path.Combine(setup.Directory, "instagram-oauth-settings.json")), StringComparison.Ordinal);
+        using var providers = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/providers"));
+        var instagram = providers.RootElement.EnumerateArray().Single(provider => provider.GetProperty("providerKey").GetString() == "instagram");
+        Assert.Empty(instagram.GetProperty("contentKinds").EnumerateArray());
+        using var cleared = await setup.PostAsync("/api/instagram/app-secret/clear", new { });
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+        Assert.DoesNotContain(secret, await cleared.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Media_gui_stages_recovers_and_deletes_through_http_without_duplicate_upload()
     {
@@ -565,11 +648,14 @@ JOIN targets target ON target.post_id=post.id WHERE post.id=$id
             return new(directory, runtime, previousProfile, previousKey);
         }
 
-        public async Task StartGuiAsync(Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost = null)
+        public async Task StartGuiAsync(Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost = null,
+            Func<InstagramCallbackListener>? createInstagramListener = null,
+            Action<string>? writeSafeInstagramFailure = null)
         {
-            _host = createMediaHost is null
+            _host = createMediaHost is null && createInstagramListener is null && writeSafeInstagramFailure is null
                 ? await GuiApplication.StartAsync(new GuiOptions(Directory, 0, false))
-                : await GuiApplication.StartForTestsAsync(new GuiOptions(Directory, 0, false), createMediaHost);
+                : await GuiApplication.StartForTestsAsync(new GuiOptions(Directory, 0, false), createMediaHost,
+                    createInstagramListener, writeSafeInstagramFailure);
             Client.BaseAddress = _host.Address;
             using var session = JsonDocument.Parse(await Client.GetStringAsync("/api/session"));
             CsrfToken = session.RootElement.GetProperty("csrfToken").GetString()!;

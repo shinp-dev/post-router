@@ -88,7 +88,8 @@ public sealed class AccountConnectionService(
         if (clientSecret is not null && string.IsNullOrWhiteSpace(clientSecret))
             throw new ArgumentException("Client secret must not be blank.");
         if (clientSecret is null && session.ExpectedAccountId is { } reconnectAccountId &&
-            string.Equals(session.Provider, "youtube", StringComparison.Ordinal))
+            (string.Equals(session.Provider, "youtube", StringComparison.Ordinal) ||
+             string.Equals(session.Provider, "instagram", StringComparison.Ordinal)))
         {
             var previous = await store.GetAuthGrantForAccountAsync(reconnectAccountId, cancellationToken).ConfigureAwait(false);
             if (previous is not null)
@@ -149,6 +150,11 @@ public sealed class AccountConnectionService(
         await using var accountLock = await accountLocks.AcquireAsync(accountId, cancellationToken).ConfigureAwait(false);
         var connection = await store.GetAccountConnectionAsync(accountId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException("Account not found.");
+        if (string.Equals(connection.Provider, "instagram", StringComparison.Ordinal))
+        {
+            var localDisconnected = await store.DisconnectAccountAsync(accountId, cancellationToken).ConfigureAwait(false);
+            return new(accountId, false, localDisconnected, null);
+        }
         var grant = await store.GetAuthGrantForAccountAsync(accountId, cancellationToken).ConfigureAwait(false);
         var remoteRevoked = false;
         string? safeError = null;

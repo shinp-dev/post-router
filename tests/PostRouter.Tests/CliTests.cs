@@ -121,6 +121,40 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Instagram_cli_secret_stdin_and_status_never_echo_credentials()
+    {
+        const string secret = "instagram-cli-secret-marker";
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-instagram", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        var previousInput = Console.In;
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var configured = await InvokeAsync(["--data-dir", directory, "account", "instagram", "configure", "--app-id", "123456"]);
+            Assert.Equal(0, configured.ExitCode);
+            Console.SetIn(new StringReader(secret + Environment.NewLine));
+            var saved = await InvokeAsync(["--data-dir", directory, "account", "instagram", "secret", "set", "--secret-stdin"]);
+            Assert.Equal(0, saved.ExitCode);
+            Assert.DoesNotContain(secret, saved.Output, StringComparison.Ordinal);
+            var status = await InvokeAsync(["--data-dir", directory, "account", "instagram", "status"]);
+            Assert.Equal(0, status.ExitCode);
+            Assert.Contains("\"appSecretConfigured\":true", status.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, status.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, await File.ReadAllTextAsync(Path.Combine(directory, "instagram-oauth-settings.json")), StringComparison.Ordinal);
+            var cleared = await InvokeAsync(["--data-dir", directory, "account", "instagram", "secret", "clear"]);
+            Assert.Equal(0, cleared.ExitCode);
+            Assert.DoesNotContain(secret, cleared.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetIn(previousInput);
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+    [Fact]
     public async Task Connect_accepts_absolute_loopback_redirect_before_provider_lookup()
     {
         var result = await InvokeConnectAsync("unregistered", "http://127.0.0.1:8765/callback");

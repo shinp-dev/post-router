@@ -8,11 +8,13 @@ function setup() {
   const nodes = new Map();
   const requests = [];
   let checkResponse = { ok: true, body: { reachable: true } };
+  let instagramFlow = { state: "Idle", errorCode: null };
+  let intervalCallback;
   const element = id => {
     if (!nodes.has(id)) {
       const listeners = {};
       nodes.set(id, {
-        listeners, textContent: "", className: "", value: "", disabled: false,
+        listeners, textContent: "", className: "", value: "", disabled: false, hidden: false,
         addEventListener(name, listener) { listeners[name] = listener; },
       });
     }
@@ -21,6 +23,7 @@ function setup() {
   const document = {
     getElementById: element,
     querySelectorAll: () => [],
+    activeElement: null,
   };
   const fetch = async (url, options) => {
     requests.push({ url, options });
@@ -29,18 +32,39 @@ function setup() {
     if (url === "/api/media/settings") result = {
       ok: true, body: { owner: "example", repository: "media", releaseTag: "staging", credentialConfigured: true },
     };
+    if (url === "/api/instagram/settings") result = {
+      ok: true, body: { appId: "123456", appSecretConfigured: true },
+    };
+    if (url === "/api/instagram/flows/latest" || url === "/api/instagram/flows/test-flow") result = {
+      ok: true, body: instagramFlow,
+    };
+    if (url === "/api/instagram/connect") result = {
+      ok: true, body: { flowId: "test-flow", authorizationUrl: "https://www.instagram.com/oauth/authorize?state=test" },
+    };
+    if (["/api/accounts", "/api/providers", "/api/publications"].includes(url)) result = {
+      ok: true, body: [],
+    };
     return { ok: result.ok, json: async () => result.body };
   };
   const scriptPath = path.join(__dirname, "..", "src", "PostRouter.Gui", "Web", "app.js");
   // The startup refresh is unrelated to these event handlers and needs a full page.
   const script = fs.readFileSync(scriptPath, "utf8").split("\n(async () => {")[0];
-  vm.runInNewContext(script, {
+  const sandbox = {
     document, fetch, Headers, FormData, crypto: { randomUUID: () => "test-request" },
-    window: { setTimeout() {} }, URL,
-  }, { filename: scriptPath });
+    window: {
+      setTimeout() {}, setInterval(callback) { intervalCallback = callback; return 1; }, clearInterval() {},
+      open() { return { location: { replace() {} }, close() {} }; },
+    }, URL,
+  };
+  vm.runInNewContext(script + "\nglobalThis.testInstagram = { refreshInstagramSettings, startInstagramFlow };", sandbox,
+    { filename: scriptPath });
   return {
     element, requests,
     setCheckResponse(value) { checkResponse = value; },
+    setInstagramFlow(value) { instagramFlow = value; },
+    async refreshInstagram() { await sandbox.testInstagram.refreshInstagramSettings(); },
+    async startInstagram() { await sandbox.testInstagram.startInstagramFlow("/api/instagram/connect"); },
+    async tickInstagram() { await intervalCallback(); },
     async fire(id, eventName) {
       await element(id).listeners[eventName]({ preventDefault() {} });
     },
@@ -99,4 +123,27 @@ test("an old check response cannot restore success after settings change", async
   complete({ reachable: true });
   await checking;
   assert.equal(ui.status(), "未確認");
+});
+
+test("Instagram failure remains visible in account settings with a safe error code", async () => {
+  const ui = setup();
+  ui.setInstagramFlow({ state: "Failed", errorCode: "instagram_code_exchange_bad_request" });
+  await ui.refreshInstagram();
+  assert.equal(ui.element("instagram-settings-state").textContent, "接続失敗");
+  assert.equal(ui.element("instagram-flow-error-code").textContent,
+    "エラーコード: instagram_code_exchange_bad_request");
+  assert.equal(ui.element("instagram-flow-error-code").hidden, false);
+  assert.equal(ui.element("instagram-flow-error-hint").hidden, false);
+});
+
+test("Instagram flow polling displays only allowlisted safe code characters", async () => {
+  const ui = setup();
+  ui.setInstagramFlow({ state: "Pending", errorCode: null });
+  await ui.startInstagram();
+  ui.setInstagramFlow({ state: "Failed", errorCode: "private-token?access_token=secret" });
+  await ui.tickInstagram();
+  assert.equal(ui.element("instagram-settings-state").textContent, "接続失敗");
+  assert.equal(ui.element("instagram-flow-error-code").textContent, "エラーコード: connection_failed");
+  assert.doesNotMatch(ui.element("notice").textContent + ui.element("instagram-flow-error-code").textContent,
+    /private-token|access_token|secret/);
 });

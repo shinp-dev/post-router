@@ -7,6 +7,10 @@ let publicationItems = [];
 let pendingRequestId = crypto.randomUUID();
 let reconnectAccountId = null;
 let mediaCheckGeneration = 0;
+let instagramSettings = null;
+let instagramFlowId = null;
+let instagramFlowTimer = null;
+let instagramLastError = null;
 
 const byId = id => document.getElementById(id);
 const escapeState = value => String(value || "Unknown").replace(/[^A-Za-z]/g, "");
@@ -54,6 +58,7 @@ async function refreshAll() {
     renderAccounts();
     renderProviders();
     renderPublications(publications);
+    await refreshInstagramSettings();
   } catch (error) { showNotice(error.message, true); }
 }
 
@@ -147,7 +152,7 @@ function addAlert(parent, message, error) {
 
 function renderProviders() {
   const connect = byId("connect-provider"); const selected = connect.value; connect.replaceChildren();
-  providers.filter(item => item.interactiveAuthentication).forEach(item => connect.add(new Option(item.providerKey, item.providerKey)));
+  providers.filter(item => item.interactiveAuthentication && item.providerKey !== "instagram").forEach(item => connect.add(new Option(item.providerKey, item.providerKey)));
   if ([...connect.options].some(item => item.value === selected)) connect.value = selected;
   updateClientSecretField();
   const post = byId("post-account"); post.replaceChildren();
@@ -282,11 +287,15 @@ async function postAction(path, message) {
 }
 
 async function accountAction(id, action) {
-  try { await request(`/api/accounts/${id}/${action}`, { method: "POST", body: "{}" }); showNotice(`${action}を完了しました。`); await refreshAll(); }
+  try { await request(`/api/accounts/${id}/${action}`, { method: "POST", body: "{}" }); showNotice(action === "disconnect" && accounts.find(account => account.accountId === id)?.provider === "instagram" ? "ローカルのInstagram接続情報を削除しました。" : `${action}を完了しました。`); await refreshAll(); }
   catch (error) { showNotice(error.message, true); }
 }
 
 function reconnect(id) {
+  if (accounts.find(account => account.accountId === id)?.provider === "instagram") {
+    startInstagramFlow(`/api/instagram/accounts/${id}/reconnect`);
+    return;
+  }
   if (accounts.find(account => account.accountId === id)?.provider === "youtube") {
     reconnectAccountId = id;
     byId("reconnect-client-secret-file").value = "";
@@ -478,6 +487,94 @@ byId("connect-form").addEventListener("submit", async event => {
     const result = await request(path, { method: "POST", body });
     if (openAuthorization(popup, result.authorizationUrl)) showNotice("認証画面を開きました。完了後に更新してください。");
   } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
+});
+
+async function refreshInstagramSettings() {
+  const [settings, latestFlow] = await Promise.all([
+    request("/api/instagram/settings"), request("/api/instagram/flows/latest"),
+  ]);
+  instagramSettings = settings;
+  if (document.activeElement !== byId("instagram-app-id")) byId("instagram-app-id").value = instagramSettings.appId || "";
+  const connected = accounts.find(account => account.provider === "instagram" && account.status === "Connected");
+  const errorCode = instagramLastError || (latestFlow.state === "Failed" ? safeInstagramErrorCode(latestFlow.errorCode) : null);
+  byId("instagram-settings-state").textContent = instagramFlowId || latestFlow.state === "Pending" ? "接続中" :
+    errorCode ? "接続失敗" :
+    connected ? `接続済み: ${connected.displayName} (${connected.remoteSubject})` :
+    instagramSettings.appId && instagramSettings.appSecretConfigured ? "未接続" : "未設定";
+  byId("instagram-flow-error-code").textContent = errorCode ? `エラーコード: ${errorCode}` : "";
+  byId("instagram-flow-error-code").hidden = !errorCode;
+  byId("instagram-flow-error-hint").hidden = !errorCode;
+  byId("instagram-connect").disabled = !instagramSettings.appId || !instagramSettings.appSecretConfigured ||
+    !!instagramFlowId || latestFlow.state === "Pending";
+}
+
+function safeInstagramErrorCode(code) {
+  return typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "connection_failed";
+}
+
+async function startInstagramFlow(path) {
+  const popup = prepareAuthorizationWindow();
+  try {
+    instagramLastError = null;
+    const result = await request(path, { method: "POST", body: JSON.stringify({ alias: null }) });
+    instagramFlowId = result.flowId;
+    byId("instagram-flow-cancel").hidden = false;
+    if (!openAuthorization(popup, result.authorizationUrl)) {
+      await request(`/api/instagram/flows/${instagramFlowId}/cancel`, { method: "POST", body: "{}" });
+      instagramFlowId = null;
+      byId("instagram-flow-cancel").hidden = true;
+      return;
+    }
+    showNotice("Instagram認証画面を開きました。");
+    await refreshInstagramSettings();
+    instagramFlowTimer = window.setInterval(async () => {
+      if (!instagramFlowId) return;
+      try {
+        const result = await request(`/api/instagram/flows/${instagramFlowId}`);
+        if (result.state === "Pending") return;
+        window.clearInterval(instagramFlowTimer);
+        instagramFlowId = null;
+        byId("instagram-flow-cancel").hidden = true;
+        instagramLastError = result.state === "Connected" ? null : safeInstagramErrorCode(result.errorCode);
+        await refreshAll();
+        await refreshInstagramSettings();
+        showNotice(result.state === "Connected" ? "Instagramに接続しました。" :
+          `Instagram接続失敗: ${instagramLastError}`, result.state !== "Connected");
+      } catch (error) { showNotice(error.message, true); }
+    }, 1500);
+  } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }
+}
+
+byId("instagram-app-id-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await request("/api/instagram/app-id", { method: "POST", body: JSON.stringify({ appId: byId("instagram-app-id").value.trim() }) });
+    await refreshInstagramSettings(); showNotice("Instagram App IDを保存しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+
+byId("instagram-secret-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    const body = new FormData(); body.set("clientSecretFile", byId("instagram-secret-file").files[0]);
+    await request("/api/instagram/app-secret", { method: "POST", body });
+    byId("instagram-secret-file").value = "";
+    await refreshInstagramSettings(); showNotice("Instagram App Secretをvaultに登録しました。");
+  } catch (error) { byId("instagram-secret-file").value = ""; showNotice(error.message, true); }
+});
+
+byId("instagram-secret-clear").addEventListener("click", async () => {
+  try {
+    await request("/api/instagram/app-secret/clear", { method: "POST", body: "{}" });
+    await refreshInstagramSettings(); showNotice("Instagram App Secretをvaultから削除しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+
+byId("instagram-connect").addEventListener("click", () => startInstagramFlow("/api/instagram/connect"));
+byId("instagram-flow-cancel").addEventListener("click", async () => {
+  if (!instagramFlowId) return;
+  try { await request(`/api/instagram/flows/${instagramFlowId}/cancel`, { method: "POST", body: "{}" }); }
+  catch (error) { showNotice(error.message, true); }
 });
 
 (async () => {

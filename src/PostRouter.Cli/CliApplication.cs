@@ -357,7 +357,118 @@ public static class CliApplication
         account.Subcommands.Add(reset);
         account.Subcommands.Add(revoke);
         account.Subcommands.Add(reconnect);
+        account.Subcommands.Add(BuildInstagramAccount(dataDirectory));
         return account;
+    }
+
+    private static Command BuildInstagramAccount(Option<string?> dataDirectory)
+    {
+        var instagram = new Command("instagram", "Configure and connect Instagram API with Instagram Login");
+        var configure = new Command("configure", "Save the Instagram App ID");
+        var appId = new Option<string>("--app-id") { Required = true };
+        configure.Options.Add(appId);
+        configure.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.InstagramOAuth.SetAppIdAsync(result.GetValue(appId)!, token);
+        }));
+        var secret = new Command("secret", "Manage the Instagram App Secret in the encrypted vault");
+        var secretSet = new Command("set", "Read the App Secret from a file, standard input or hidden prompt");
+        var secretFile = new Option<FileInfo?>("--secret-file");
+        var secretStdin = new Option<bool>("--secret-stdin");
+        secretSet.Options.Add(secretFile); secretSet.Options.Add(secretStdin);
+        secretSet.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            if (result.GetValue(secretFile) is not null && result.GetValue(secretStdin))
+                throw new ArgumentException("Choose either --secret-file or --secret-stdin.");
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            byte[] bytes;
+            if (result.GetValue(secretFile) is { } file)
+            {
+                var value = await ReadClientSecretAsync(file, token);
+                bytes = Encoding.UTF8.GetBytes(value!);
+            }
+            else bytes = await ReadSecretBytesAsync(result.GetValue(secretStdin), "Instagram App Secret", token);
+            try { return await runtime.InstagramOAuth.SetAppSecretAsync(bytes, token); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }));
+        var secretClear = new Command("clear", "Remove the configured App Secret from the local vault");
+        secretClear.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.InstagramOAuth.ClearAppSecretAsync(token);
+        }));
+        secret.Subcommands.Add(secretSet); secret.Subcommands.Add(secretClear);
+        var status = new Command("status", "Show non-secret configuration and account status");
+        status.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return new
+            {
+                settings = await runtime.InstagramOAuth.StatusAsync(token),
+                accounts = (await runtime.Store.GetAccountConnectionsAsync(token)).Where(item => item.Provider == "instagram").ToArray()
+            };
+        }));
+        var connect = new Command("connect", "Connect a Professional Instagram account");
+        var alias = new Option<string?>("--alias");
+        connect.Options.Add(alias);
+        connect.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await RunInstagramConnectAsync(runtime, null, result.GetValue(alias), token);
+        }));
+        var reconnect = new Command("reconnect", "Reconnect the same Instagram account");
+        var reconnectAccount = new Option<Guid>("--account") { Required = true };
+        reconnect.Options.Add(reconnectAccount);
+        reconnect.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await RunInstagramConnectAsync(runtime, result.GetValue(reconnectAccount), null, token);
+        }));
+        instagram.Subcommands.Add(configure);
+        instagram.Subcommands.Add(secret);
+        instagram.Subcommands.Add(status);
+        instagram.Subcommands.Add(connect);
+        instagram.Subcommands.Add(reconnect);
+        var disconnect = new Command("disconnect", "Remove local Instagram credentials only");
+        var disconnectAccount = new Option<Guid>("--account") { Required = true };
+        disconnect.Options.Add(disconnectAccount);
+        disconnect.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var id = result.GetValue(disconnectAccount);
+            var current = await runtime.Accounts.StatusAsync(id, token) ?? throw new KeyNotFoundException("Account not found.");
+            if (current.Provider != "instagram") throw new ArgumentException("Account is not an Instagram connection.");
+            await runtime.Accounts.DisconnectAsync(id, token);
+            return new
+            {
+                accountId = id,
+                status = "Disconnected",
+                remoteRevoked = false,
+                message = "Only local Instagram credentials were removed."
+            };
+        }));
+        instagram.Subcommands.Add(disconnect);
+        return instagram;
+    }
+
+    private static async Task<AccountConnection> RunInstagramConnectAsync(PostRouterRuntime runtime, Guid? accountId,
+        string? alias, CancellationToken cancellationToken)
+    {
+        var appId = await runtime.InstagramOAuth.ReadAppIdAsync(cancellationToken);
+        var secret = await runtime.InstagramOAuth.ReadAppSecretAsync(cancellationToken);
+        var redirect = new Uri(InstagramOAuthConfigurationService.RedirectUri);
+        var session = accountId is { } id
+            ? await runtime.Accounts.BeginReconnectAsync(id, redirect, cancellationToken)
+            : runtime.Accounts.BeginConnect("instagram", appId, redirect, alias);
+        if (session.Provider != "instagram" || session.ClientId != appId)
+            throw new InvalidOperationException("instagram_app_id_mismatch");
+        await using var listener = new InstagramCallbackListener();
+        try { Process.Start(new ProcessStartInfo(session.AuthorizationUri.AbsoluteUri) { UseShellExecute = true }); }
+        catch { Console.Error.WriteLine($"Open this authorization URL in your browser: {session.AuthorizationUri.AbsoluteUri}"); }
+        return await listener.ReceiveAsync(session,
+            (code, state, token) => runtime.Accounts.CompleteConnectAsync(session, code, state, secret, token),
+            cancellationToken);
     }
 
     private static Command BuildMedia(Option<string?> dataDirectory)
@@ -388,7 +499,7 @@ public static class CliApplication
         set.SetAction((result, token) => ExecuteAsync(async () =>
         {
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var bytes = await ReadGitHubTokenAsync(result.GetValue(tokenStdin), token);
+            var bytes = await ReadSecretBytesAsync(result.GetValue(tokenStdin), "GitHub PAT", token);
             try { return await runtime.GitHubMedia.SetCredentialAsync(bytes, token); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }));
@@ -468,7 +579,7 @@ public static class CliApplication
         return media;
     }
 
-    private static async Task<byte[]> ReadGitHubTokenAsync(bool fromStdin, CancellationToken cancellationToken)
+    private static async Task<byte[]> ReadSecretBytesAsync(bool fromStdin, string prompt, CancellationToken cancellationToken)
     {
         var bytes = new byte[1024];
         var length = 0;
@@ -482,7 +593,7 @@ public static class CliApplication
                     if (character[0] == '\n') break;
                     if (character[0] == '\r') continue;
                     if (character[0] is < '!' or > '~' || length == bytes.Length)
-                        throw new ArgumentException("GitHub credential is invalid.");
+                        throw new ArgumentException("Credential is invalid.");
                     bytes[length++] = (byte)character[0];
                 }
                 return bytes.AsSpan(0, length).ToArray();
@@ -493,8 +604,8 @@ public static class CliApplication
                 Array.Clear(character);
             }
         }
-        if (Console.IsInputRedirected) throw new ArgumentException("Use --token-stdin when reading a GitHub credential from standard input.");
-        Console.Error.Write("GitHub PAT: ");
+        if (Console.IsInputRedirected) throw new ArgumentException("Use the stdin option when reading a credential from standard input.");
+        Console.Error.Write($"{prompt}: ");
         try
         {
             while (true)
