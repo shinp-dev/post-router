@@ -41,6 +41,10 @@ input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: .2em 0 0; }
 textarea { resize: vertical; }
 .hint { color: #68788c; font-size: .84rem; font-weight: 400; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+.media-check-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.media-check-status { color: #68788c; font-weight: 650; }
+.media-check-status.ok { color: #17643c; }
+.media-check-status.failed { color: #9b2020; }
 .publication-controls { display: flex; align-items: center; gap: 14px; }
 #publications .heading { flex-wrap: wrap; gap: 12px; }
 .table-wrap { padding: 0; overflow-x: auto; }

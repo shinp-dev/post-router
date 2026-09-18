@@ -450,7 +450,7 @@ public static class CliApplication
             using var host = await runtime.CreateGitHubMediaHostAsync(token);
             return await runtime.MediaOperations.RecoverAsync(result.GetValue(recoverId), host, token);
         }, pendingIsIncomplete: true));
-        var delete = new Command("delete", "Delete the remote Release Asset and keep the local operation history");
+        var delete = new Command("delete", "Delete the remote Release Asset and its local operation record");
         var deleteId = new Argument<Guid>("id");
         var confirmDelete = new Option<bool>("--confirm") { Description = "Confirm deletion of the remote Release Asset" };
         delete.Arguments.Add(deleteId); delete.Options.Add(confirmDelete);
@@ -458,8 +458,6 @@ public static class CliApplication
         {
             if (!result.GetValue(confirmDelete)) throw new ArgumentException("--confirm is required to delete a staged asset.");
             await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
-            var current = await runtime.MediaOperations.GetAsync(result.GetValue(deleteId), token);
-            if (current.Status == "Deleted") return current;
             using var host = await runtime.CreateGitHubMediaHostAsync(token);
             return await runtime.MediaOperations.DeleteAsync(result.GetValue(deleteId), host, token);
         }));
@@ -613,8 +611,10 @@ public static class CliApplication
         {
             var result = await action();
             var pending = pendingIsIncomplete && result is PublicMediaOperationView { Status: "Pending" };
-            WriteSuccess(result, pending ? ["media_result_pending_recover_required"] : []);
-            return pending ? 7 : 0;
+            var cleanupFailed = result is PublicMediaOperationView { LastErrorCode: "media_payload_cleanup_failed" };
+            WriteSuccess(result, cleanupFailed ? ["media_payload_cleanup_failed"] :
+                pending ? ["media_result_pending_recover_required"] : []);
+            return pending || cleanupFailed ? 7 : 0;
         }
         catch (ArgumentException ex) { WriteError("invalid_input", ex.Message); return 2; }
         catch (PlatformNotSupportedException ex) { WriteError("platform", ex.Message); return 3; }

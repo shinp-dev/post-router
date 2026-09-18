@@ -38,6 +38,44 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Media_cli_list_and_show_exclude_removed_operation_record()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-media-list", Guid.NewGuid().ToString("N"));
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var id = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            var sha = new string('a', 64);
+            var staged = new StagedPublicAsset(new Uri("https://github.com/example/media/releases/download/staging/asset.jpg"),
+                new StagedPublicAssetHandle("opaque-handle"), now, now.AddHours(1), sha, 7);
+            var journal = new FilePublicMediaOperationStore(directory);
+            await journal.SaveAsync(new PublicMediaOperationRecord(id, sha, 7, "image/jpeg",
+                new PublicMediaStagingOperation("opaque-operation"), staged, now, now, null));
+            var before = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, before.ExitCode);
+            Assert.Contains(id.ToString("D"), before.Output, StringComparison.OrdinalIgnoreCase);
+
+            // The workflow removes the record only after the remote host confirms deletion.
+            await journal.DeleteAsync(id);
+            var list = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, list.ExitCode);
+            using var json = JsonDocument.Parse(list.Output);
+            Assert.Empty(json.RootElement.GetProperty("result").EnumerateArray());
+            var show = await InvokeAsync(["--data-dir", directory, "media", "show", id.ToString("D")]);
+            Assert.Equal(6, show.ExitCode);
+            Assert.Contains("\"code\":\"not_found\"", show.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Media_cli_registers_pat_from_stdin_without_echo_or_plaintext_storage()
     {
         const string pat = "github-cli-pat-secret-marker";

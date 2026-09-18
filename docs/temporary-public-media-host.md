@@ -16,7 +16,11 @@ public URLには元ファイル名、ローカルpath、投稿ID、SHA-256、tok
 4. upload応答のtimeoutや5xxで成否不明なら、asset一覧で同名の正常なuploadを探す。見つからなければ `github_upload_outcome_unknown` を返し、**自動再uploadしない**。再起動後は永続化したoperationでread-onlyの `RecoverAsync` を呼ぶ。成否不明のoperationを新しいoperationで置き換えて再uploadしない。
 5. `DeleteAsync(handle)` はhandleに入れたasset IDからGitHub Releases APIでassetだけを削除する。既に存在しないassetは削除済みとして扱う。Releaseそのものは削除しない。
 
-operationとhandleはJSONとして保存可能なopaque値。内部には実装/version、repository、release、asset IDと名前、URL、元assetのSHA-256/size、時刻を含み、tokenは含まない。CLI/GUIの操作記録はdata directoryの `github-media-operations` に、upload開始前にatomicに保存する。API/CLIの結果は操作ID・状態・公開URLなどだけを返し、ローカルpath、operation、handleを返さない。`Pending` は結果未確定であり、`recover` はread-only照会のみ。`Deleted` でもローカルspoolと操作履歴は残る。今回DB schemaは追加していない。
+operationとhandleはJSONとして保存可能なopaque値。内部には実装/version、repository、release、asset IDと名前、URL、元assetのSHA-256/size、時刻を含み、tokenは含まない。CLI/GUIの操作記録はdata directoryの `github-media-operations` に、upload開始前にatomicに保存する。記録はoperationごとに最新状態1件だけで、SHA-256、size、MIME、remote handle/URL、作成・更新時刻を持ち、元ファイルのローカルpathや素材本体は含まない。API/CLIの結果は操作ID・状態・公開URLなどだけを返し、ローカルpath、operation、handleを返さない。今回DB schemaは追加していない。
+
+GitHub stagingの素材コピーは専用の `<data-dir>/media-staging-payload/<operation-id>` に一時保存する。既存Providerのshared spoolには保存せず、呼び出し元の元ファイルも削除しない。`Staged` と `Pending` のいずれに到達しても一時コピーを削除する。`Pending` の `recover` はmetadataだけを使うread-only照会で、再uploadしない。削除に失敗した場合はsafe code `media_payload_cleanup_failed` を記録し、recoverまたはdelete時に再試行する。素材コピーが残る間はoperation記録を保持する。
+
+GitHubがasset削除を確認したとき（DELETE成功、またはGET/DELETEで404）、operation JSONも削除する。`Deleted` 履歴は保持しない。timeout、network error、5xx、応答喪失など削除結果が不明な場合はmetadataとremote handleを保持して再試行できるようにする。GUIの履歴とCLIのlistには現存するoperationのみ表示され、削除後のshowは `not_found` になる。
 
 GitHubへのmediaはRelease Asset APIで送信し、通常のgit commitやGitHub Pagesには追加しない。1つの専用public repositoryとpublished Releaseをstaging areaとして用いる。owner、repository、release tag、論理TTL、最大sizeは `GitHubReleaseMediaHostOptions` から渡す。upload先は `uploads.github.com`、API先は `api.github.com` に固定し、productionのHTTP clientはredirectを追わない。GitHub応答のURLは `https://github.com/{owner}/{repository}/releases/download/{tag}/{opaque-name}` との一致を確認する。[GitHub Release API](https://docs.github.com/en/rest/releases/releases)、[Release Asset API](https://docs.github.com/en/rest/releases/assets)
 
@@ -24,7 +28,7 @@ GitHubへのmediaはRelease Asset APIで送信し、通常のgit commitやGitHub
 
 GitHub tokenは`IGitHubMediaTokenSource`からリクエスト時だけ取得する。既存の暗号化 `IVault` にpurpose `github-media-staging-token` で格納し、そのblob IDだけを設定ファイルに保存する。tokenそのものをコード、設定ファイル、DB平文、URL、ログ、例外へ書かない。最低限、対象repositoryのContents write権限を持つGitHub tokenが必要。public repositoryとpublished Releaseは利用者が事前に用意する。実GitHubへのlive acceptanceは未実施。
 
-CLIでは `pub media configure --owner OWNER --repository REPO --tag TAG` で公開先を設定し、`pub media credential set` の非表示プロンプト、または `pub media credential set --token-stdin` でPATをvaultに登録する。PATをprocess引数に直接渡すoptionはない。`pub media status` は設定とPAT登録有無だけを返し、`pub media check` は公開済みReleaseへのアクセスをread-onlyで確認する。`pub media credential clear` でPATを削除できる。GUIでは「設定」画面から同じ登録・削除・接続確認を行う。GUIはPATを再表示せず、browser storageにも保存しない。ownerかrepositoryを変更すると以前のPATは削除される。
+CLIでは `pub media configure --owner OWNER --repository REPO --tag TAG` で公開先を設定し、`pub media credential set` の非表示プロンプト、または `pub media credential set --token-stdin` でPATをvaultに登録する。PATをprocess引数に直接渡すoptionはない。`pub media status` は設定とPAT登録有無だけを返し、`pub media check` は公開済みReleaseへのアクセスをread-onlyで確認する。`pub media credential clear` でPATを削除できる。GUIでは「設定」画面から同じ登録・削除・接続確認を行い、確認結果はボタンの横に「未確認」「接続OK」「接続失敗」で表示する。設定やPATを変更すると未確認へ戻る。GUIはPATを再表示せず、browser storageにも保存しない。ownerかrepositoryを変更すると以前のPATは削除される。
 
 素材の操作は次のとおり。GUIでは「設定」画面でファイルを選択し公開への同意をチェックしてstageする。履歴からPendingのrecover、Stagedのdeleteを実行できる。deleteには確認ダイアログがある。未削除の操作がある間は公開先のowner/repository/tag変更を拒否する。PATのローカル削除はGitHub側でのPAT失効を行わない。
 
@@ -36,6 +40,6 @@ pub media recover OPERATION_ID
 pub media delete OPERATION_ID --confirm
 ```
 
-stageはJPEG/MP4の1ファイル、最大2 GiB。stage/recoverの戻り値が `Pending` の場合、CLIは終了コード7とwarning `media_result_pending_recover_required` を返す。操作IDを控え、`recover`で照会する。別のstageコマンドを実行すると新しい公開assetを作る意図になる。deleteはGitHub Release Assetだけを削除する。
+stageはJPEG/MP4の1ファイル、最大2 GiB。stage/recoverの戻り値が `Pending` の場合、CLIは終了コード7とwarning `media_result_pending_recover_required` を返す。操作IDを控え、`recover`で照会する。別のstageコマンドを実行すると新しい公開assetを作る意図になる。deleteはGitHub Release Assetを削除し、削除確定後にローカルoperation記録も削除する。
 
 GitHubはupload失敗時に `starter` 状態の空assetを残す場合がある。正常な `uploaded` asset以外は回復成功とせず、自動削除や再uploadもしない。利用者がGitHub側の状態を確認してから処理する。[GitHub公式のupload注意事項](https://docs.github.com/en/rest/releases/assets#upload-a-release-asset)

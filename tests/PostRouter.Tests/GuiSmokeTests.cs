@@ -59,6 +59,8 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain(setup.Directory, stagedBody, StringComparison.OrdinalIgnoreCase);
         var id = stagedJson.RootElement.GetProperty("id").GetGuid();
         Assert.Equal(1, github.UploadCalls);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(setup.Directory, "media-staging-payload")));
+        Assert.True(File.Exists(Path.Combine(setup.Directory, "github-media-operations", $"{id:N}.json")));
         using var blockedChange = await setup.PostAsync("/api/media/settings", new
         {
             owner = "example",
@@ -82,6 +84,7 @@ public sealed class GuiSmokeTests
         Assert.Equal(HttpStatusCode.OK, deletedResponse.StatusCode);
         Assert.Contains("\"status\":\"Deleted\"", await deletedResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(1, github.DeleteCalls);
+        Assert.False(File.Exists(Path.Combine(setup.Directory, "github-media-operations", $"{id:N}.json")));
         using var allowedChange = await setup.PostAsync("/api/media/settings", new
         {
             owner = "example",
@@ -90,7 +93,9 @@ public sealed class GuiSmokeTests
         });
         Assert.Equal(HttpStatusCode.OK, allowedChange.StatusCode);
         using var history = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/media/operations"));
-        Assert.Equal("Deleted", Assert.Single(history.RootElement.EnumerateArray()).GetProperty("status").GetString());
+        Assert.Empty(history.RootElement.EnumerateArray());
+        using var missing = await setup.Client.GetAsync($"/api/media/operations/{id:D}");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
     [Fact]
@@ -171,6 +176,8 @@ public sealed class GuiSmokeTests
         var html = await setup.Client.GetStringAsync("/");
         var script = await setup.Client.GetStringAsync("/app.js");
         Assert.Contains("media-stage-acknowledge", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"media-check-status\"", html, StringComparison.Ordinal);
+        Assert.Contains("aria-live=\"polite\"", html, StringComparison.Ordinal);
         Assert.Contains("recover（照会のみ）", script, StringComparison.Ordinal);
         Assert.Contains("GitHub上のassetを削除", script, StringComparison.Ordinal);
         using var list = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/media/operations"));

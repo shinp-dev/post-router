@@ -223,8 +223,6 @@ public static class GuiApplication
         app.MapPost("/api/media/operations/{id:guid}/delete", async (Guid id, MediaDeleteRequest request, CancellationToken token) =>
         {
             if (!request.Confirmed) throw new ArgumentException("Remote asset deletion must be confirmed.");
-            var current = await runtime.MediaOperations.GetAsync(id, token).ConfigureAwait(false);
-            if (current.Status == "Deleted") return Results.Json(current);
             using var host = await createMediaHost(token).ConfigureAwait(false);
             return Results.Json(await runtime.MediaOperations.DeleteAsync(id, host, token).ConfigureAwait(false));
         });

@@ -39,7 +39,7 @@ Phase 2Aの実装名は、上表の将来alias UXより安全なID指定を優�
 
 GitHub一時公開メディアの現行CLIは `media configure --owner OWNER --repository REPO --tag TAG`、`media credential set`（非表示入力）、`media credential set --token-stdin`、`media credential clear`、`media status`、`media check`。`check` はpublic repositoryとpublished Releaseをread-onlyで確認し、素材をuploadしない。PATを引数で渡すoptionはない。PATはvaultに保存し、JSON結果には登録有無だけを出す。
 
-`media stage --file FILE --acknowledge-public` はJPEG/MP4を公開stageし、操作IDと状態を返す。`media list` / `media show ID` は保存済み操作を表示する。`media recover ID` はPendingの結果を照会するだけで再uploadしない。`media delete ID --confirm` はGitHub上のassetだけを削除する。stage/recover結果がPendingなら終了コード7で操作IDを返すので、そのIDで照会し、新しいstageで代用しない。未削除の操作がある間は公開先設定を変更できない。[詳細](temporary-public-media-host.md)
+`media stage --file FILE --acknowledge-public` はJPEG/MP4を公開stageし、操作IDと状態を返す。素材コピーは専用一時領域へ置き、Staged/Pending到達後に削除する。`media list` / `media show ID` はremote assetが残る可能性のある操作を表示する。`media recover ID` はmetadataだけでPendingの結果を照会し、再uploadしない。`media delete ID --confirm` はGitHub上のassetを削除し、remote削除確定後にoperation metadataも削除する。Deleted履歴は保持せず、削除後のshowは `not_found`。stage/recover結果がPendingなら終了コード7で操作IDを返すので、そのIDで照会し、新しいstageで代用しない。未削除の操作がある間は公開先設定を変更できない。GUIの接続確認結果は設定画面のボタン横に表示される。[詳細](temporary-public-media-host.md)
 
 ## 共通投稿入力
 

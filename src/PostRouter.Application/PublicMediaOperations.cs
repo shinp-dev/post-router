@@ -3,8 +3,8 @@ using PostRouter.Domain;
 namespace PostRouter.Application;
 
 public sealed record PublicMediaOperationRecord(
-    Guid Id, MediaAsset Source, PublicMediaStagingOperation Operation,
-    StagedPublicAsset? Staged, bool Deleted, DateTimeOffset CreatedAt, string? LastErrorCode);
+    Guid Id, string Sha256, long SizeBytes, string MimeType, PublicMediaStagingOperation Operation,
+    StagedPublicAsset? Staged, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? LastErrorCode);
 
 public sealed record PublicMediaOperationView(
     Guid Id, string Status, string MediaType, long SizeBytes, string? PublicUrl,
@@ -16,30 +16,64 @@ public interface IPublicMediaOperationStore
     Task<PublicMediaOperationRecord?> ReadAsync(Guid id, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<PublicMediaOperationRecord>> ListAsync(CancellationToken cancellationToken = default);
     Task SaveAsync(PublicMediaOperationRecord record, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 }
 
-public sealed class PublicMediaOperations(ISpoolStore spool, IPublicMediaOperationStore journal)
+public interface ITemporaryPublicMediaPayloadStore
 {
+    Task<MediaAsset> ImportAsync(Guid operationId, string sourcePath, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid operationId, CancellationToken cancellationToken = default);
+}
+
+public sealed class PublicMediaOperations(ITemporaryPublicMediaPayloadStore payloads, IPublicMediaOperationStore journal)
+{
+    private const string PayloadCleanupFailed = "media_payload_cleanup_failed";
+
     public async Task<PublicMediaOperationView> StageAsync(string sourcePath, ITemporaryPublicMediaHost host,
         CancellationToken cancellationToken = default)
     {
-        var source = await spool.ImportAsync(sourcePath, cancellationToken).ConfigureAwait(false);
-        var operation = host.Prepare(source);
         var id = Guid.NewGuid();
+        MediaAsset? source = null;
+        PublicMediaOperationRecord? record = null;
+        var cleanupFailedWithoutRecord = false;
         await using var lease = await journal.AcquireAsync(id, cancellationToken).ConfigureAwait(false);
-        var record = new PublicMediaOperationRecord(id, source, operation, null, false, DateTimeOffset.UtcNow, null);
-        await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
         try
         {
-            var staged = await host.StageAsync(source, operation, cancellationToken).ConfigureAwait(false);
-            record = record with { Staged = staged };
+            source = await payloads.ImportAsync(id, sourcePath, cancellationToken).ConfigureAwait(false);
+            var operation = host.Prepare(source);
+            var now = DateTimeOffset.UtcNow;
+            record = new(id, source.Sha256, source.SizeBytes, source.DetectedMime, operation, null, now, now, null);
+            await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var staged = await host.StageAsync(source, operation, cancellationToken).ConfigureAwait(false);
+                record = record with { Staged = staged, UpdatedAt = DateTimeOffset.UtcNow };
+            }
+            catch (TemporaryPublicMediaException error)
+            {
+                record = record with { LastErrorCode = error.Code, UpdatedAt = DateTimeOffset.UtcNow };
+            }
+            await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
         }
-        catch (TemporaryPublicMediaException error)
+        finally
         {
-            record = record with { LastErrorCode = error.Code };
+            // Pending recovery only queries GitHub. The copied payload is never needed again.
+            if (source is not null)
+            {
+                try { await payloads.DeleteAsync(id, CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    if (record is null) cleanupFailedWithoutRecord = true;
+                    else
+                    {
+                        record = record with { LastErrorCode = PayloadCleanupFailed, UpdatedAt = DateTimeOffset.UtcNow };
+                        await journal.SaveAsync(record, CancellationToken.None).ConfigureAwait(false);
+                    }
+                }
+            }
         }
-        await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
-        return View(record);
+        if (cleanupFailedWithoutRecord) throw new TemporaryPublicMediaException(PayloadCleanupFailed);
+        return View(record!);
     }
 
     public async Task<PublicMediaOperationView> RecoverAsync(Guid id, ITemporaryPublicMediaHost host,
@@ -47,15 +81,27 @@ public sealed class PublicMediaOperations(ISpoolStore spool, IPublicMediaOperati
     {
         await using var lease = await journal.AcquireAsync(id, cancellationToken).ConfigureAwait(false);
         var record = await RequiredAsync(id, cancellationToken).ConfigureAwait(false);
-        if (record.Deleted || record.Staged is not null) return View(record);
+        record = await RetryPayloadCleanupAsync(record, cancellationToken).ConfigureAwait(false);
+        if (record.Staged is not null) return View(record);
+        var cleanupStillFailed = record.LastErrorCode == PayloadCleanupFailed;
         try
         {
             var staged = await host.RecoverAsync(record.Operation, cancellationToken).ConfigureAwait(false);
-            record = record with { Staged = staged, LastErrorCode = staged is null ? "github_asset_not_found" : null };
+            record = record with
+            {
+                Staged = staged,
+                LastErrorCode = cleanupStillFailed ? PayloadCleanupFailed :
+                    staged is null ? "github_asset_not_found" : null,
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
         }
         catch (TemporaryPublicMediaException error)
         {
-            record = record with { LastErrorCode = error.Code };
+            record = record with
+            {
+                LastErrorCode = cleanupStillFailed ? PayloadCleanupFailed : error.Code,
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
         }
         await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
         return View(record);
@@ -66,12 +112,12 @@ public sealed class PublicMediaOperations(ISpoolStore spool, IPublicMediaOperati
     {
         await using var lease = await journal.AcquireAsync(id, cancellationToken).ConfigureAwait(false);
         var record = await RequiredAsync(id, cancellationToken).ConfigureAwait(false);
-        if (record.Deleted) return View(record);
+        // Keep the operation ID while a failed local cleanup still needs retrying.
+        await payloads.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
         if (record.Staged is null) throw new InvalidOperationException("media_not_staged");
         await host.DeleteAsync(record.Staged.Handle, cancellationToken).ConfigureAwait(false);
-        record = record with { Deleted = true, LastErrorCode = null };
-        await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
-        return View(record);
+        await journal.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
+        return View(record) with { Status = "Deleted", PublicUrl = null, LastErrorCode = null };
     }
 
     public async Task<PublicMediaOperationView> GetAsync(Guid id, CancellationToken cancellationToken = default) =>
@@ -80,9 +126,18 @@ public sealed class PublicMediaOperations(ISpoolStore spool, IPublicMediaOperati
     public async Task<IReadOnlyList<PublicMediaOperationView>> ListAsync(CancellationToken cancellationToken = default)
     {
         var records = await journal.ListAsync(cancellationToken).ConfigureAwait(false);
-        return records.Where(record => !record.Deleted).OrderByDescending(record => record.CreatedAt)
-            .Concat(records.Where(record => record.Deleted).OrderByDescending(record => record.CreatedAt).Take(100))
-            .Select(View).ToArray();
+        return records.OrderByDescending(record => record.CreatedAt).Select(View).ToArray();
+    }
+
+    private async Task<PublicMediaOperationRecord> RetryPayloadCleanupAsync(PublicMediaOperationRecord record,
+        CancellationToken cancellationToken)
+    {
+        if (record.LastErrorCode != PayloadCleanupFailed) return record;
+        try { await payloads.DeleteAsync(record.Id, cancellationToken).ConfigureAwait(false); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return record; }
+        record = record with { LastErrorCode = null, UpdatedAt = DateTimeOffset.UtcNow };
+        await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
+        return record;
     }
 
     private async Task<PublicMediaOperationRecord> RequiredAsync(Guid id, CancellationToken cancellationToken) =>
@@ -90,8 +145,6 @@ public sealed class PublicMediaOperations(ISpoolStore spool, IPublicMediaOperati
         ?? throw new KeyNotFoundException("Media operation was not found.");
 
     private static PublicMediaOperationView View(PublicMediaOperationRecord record) =>
-        new(record.Id, record.Deleted ? "Deleted" : record.Staged is null ? "Pending" : "Staged",
-            record.Source.DetectedMime, record.Source.SizeBytes,
-            record.Deleted ? null : record.Staged?.PublicUrl.AbsoluteUri,
-            record.CreatedAt, record.Staged?.ExpiresAt, record.LastErrorCode);
+        new(record.Id, record.Staged is null ? "Pending" : "Staged", record.MimeType, record.SizeBytes,
+            record.Staged?.PublicUrl.AbsoluteUri, record.CreatedAt, record.Staged?.ExpiresAt, record.LastErrorCode);
 }

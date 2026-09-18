@@ -56,7 +56,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         var spoolDirectory = Path.Combine(dataDirectory, "spool");
         Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, spoolDirectory), applicationStore, TimeProvider.System);
         Spool = new SpoolStore(spoolDirectory);
-        MediaOperations = new PublicMediaOperations(Spool, mediaJournal);
+        MediaOperations = new PublicMediaOperations(new TemporaryPublicMediaPayloadStore(dataDirectory), mediaJournal);
     }
 
     public string DataDirectory { get; }

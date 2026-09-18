@@ -32,7 +32,7 @@ public sealed class GitHubMediaConfigurationService(
             && (!string.Equals(previous.Owner, owner, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(previous.Repository, repository, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(previous.ReleaseTag, releaseTag, StringComparison.Ordinal));
-        if (targetChanged && (await operations.ListAsync(cancellationToken).ConfigureAwait(false)).Any(item => !item.Deleted))
+        if (targetChanged && (await operations.ListAsync(cancellationToken).ConfigureAwait(false)).Any())
             throw new InvalidOperationException("github_media_operations_active");
         var sameRepository = previous is not null
             && string.Equals(previous.Owner, owner, StringComparison.OrdinalIgnoreCase)

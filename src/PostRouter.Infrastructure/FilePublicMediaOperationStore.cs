@@ -20,14 +20,24 @@ public sealed class FilePublicMediaOperationStore(string dataDirectory) : IPubli
         if (id == Guid.Empty) throw new ArgumentException("Media operation ID is invalid.");
         var path = Path.Combine(_root, $"{id:N}.json");
         if (!File.Exists(path)) return null;
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        if (stream.Length is <= 0 or > 16384) throw new InvalidDataException("Media operation record is invalid.");
-        var value = await JsonSerializer.DeserializeAsync<PublicMediaOperationRecord>(stream, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-        if (value is null || value.Id != id || value.Operation is null || value.Source is null)
-            throw new InvalidDataException("Media operation record is invalid.");
-        return value;
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+        catch (FileNotFoundException) { return null; } // A confirmed delete may race a list/read.
+        await using (stream)
+        {
+            if (stream.Length is <= 0 or > 16384) throw new InvalidDataException("Media operation record is invalid.");
+            var value = await JsonSerializer.DeserializeAsync<PublicMediaOperationRecord>(stream, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (value is null || value.Id != id || value.Operation is null
+                || value.Sha256 is not { Length: 64 } || value.SizeBytes <= 0
+                || value.MimeType is not ("image/jpeg" or "video/mp4"))
+                throw new InvalidDataException("Media operation record is invalid.");
+            return value;
+        }
     }
 
     public async Task<IReadOnlyList<PublicMediaOperationRecord>> ListAsync(CancellationToken cancellationToken = default)
@@ -38,8 +48,10 @@ public sealed class FilePublicMediaOperationStore(string dataDirectory) : IPubli
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out var id))
-                records.Add(await ReadAsync(id, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidDataException("Media operation record is missing."));
+            {
+                var record = await ReadAsync(id, cancellationToken).ConfigureAwait(false);
+                if (record is not null) records.Add(record);
+            }
         }
         return records;
     }
@@ -61,5 +73,15 @@ public sealed class FilePublicMediaOperationStore(string dataDirectory) : IPubli
             File.Move(temporary, path, true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty) throw new ArgumentException("Media operation ID is invalid.");
+        cancellationToken.ThrowIfCancellationRequested();
+        // The caller holds the operation lock. Removing one JSON file cannot leave a partial record.
+        var path = Path.Combine(_root, $"{id:N}.json");
+        if (File.Exists(path)) File.Delete(path);
+        return Task.CompletedTask;
     }
 }

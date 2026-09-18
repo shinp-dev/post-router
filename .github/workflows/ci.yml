@@ -20,6 +20,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.401
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Restore locked dependencies
         run: dotnet restore PostRouter.sln --locked-mode -m:1
       - name: Build
@@ -29,6 +32,8 @@ jobs:
         run: dotnet format whitespace src --folder --verify-no-changes && dotnet format whitespace tests --folder --verify-no-changes
       - name: Test
         run: dotnet test PostRouter.sln -c Release --no-build --no-restore -m:1 --logger "trx;LogFileName=tests.trx"
+      - name: Test GUI connection status
+        run: node --test tests/gui-media-check.test.cjs
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

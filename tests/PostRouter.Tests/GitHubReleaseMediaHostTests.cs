@@ -323,6 +323,22 @@ public sealed class GitHubReleaseMediaHostTests
     }
 
     [Fact]
+    public async Task Delete_server_error_keeps_handle_retryable_without_exposing_response_body()
+    {
+        using var setup = new Setup();
+        var asset = setup.Asset("image/jpeg");
+        var staged = await setup.Host.StageAsync(asset, setup.Host.Prepare(asset));
+        setup.Server.DeleteError = HttpStatusCode.BadGateway;
+        var error = await Assert.ThrowsAsync<TemporaryPublicMediaException>(() => setup.Host.DeleteAsync(staged.Handle));
+        Assert.Equal("github_server_error", error.Code);
+        Assert.DoesNotContain("secret-provider-body", error.ToString(), StringComparison.Ordinal);
+        Assert.True(setup.Server.HasAsset);
+        setup.Server.DeleteError = null;
+        await setup.Host.DeleteAsync(staged.Handle);
+        Assert.False(setup.Server.HasAsset);
+    }
+
+    [Fact]
     public async Task Reusing_same_operation_finds_existing_asset_without_second_upload()
     {
         using var setup = new Setup();

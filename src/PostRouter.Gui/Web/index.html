@@ -85,7 +85,7 @@
         <p class="wide hint">PATはローカルのcredential vaultに暗号化して保存します。ここには再表示されません。</p>
         <div class="wide actions"><button id="media-clear" type="button" class="secondary">PATを削除</button><button type="submit">PATを登録・更新</button></div>
       </form>
-      <div class="panel"><h2>接続確認</h2><p class="hint">設定したReleaseへのアクセスを確認します。素材のアップロードは行いません。</p><button id="media-check" type="button">接続を確認</button></div>
+      <div class="panel"><h2>接続確認</h2><p class="hint">設定したReleaseへのアクセスを確認します。素材のアップロードは行いません。</p><div class="media-check-row"><button id="media-check" type="button">接続を確認</button><span id="media-check-status" class="media-check-status" role="status" aria-live="polite">未確認</span></div></div>
       <form id="media-stage-form" class="panel form-grid">
         <h2 class="wide">素材を公開stage</h2>
         <p class="wide hint">JPEGまたはMP4をGitHub Release Assetとして公開します（最大2 GiB）。論理期限を過ぎても自動削除されません。利用後は下の履歴から削除してください。</p>
@@ -93,7 +93,7 @@
         <label class="wide choice"><input id="media-stage-acknowledge" type="checkbox" required><span>この素材が削除するまでインターネットから取得可能になることを確認しました。</span></label>
         <div class="wide actions"><button id="media-stage-submit" type="submit">公開stage</button></div>
       </form>
-      <div class="panel"><div class="heading"><h2>staging履歴</h2><button id="media-operations-refresh" type="button" class="secondary">更新</button></div><p class="hint">Pendingは結果が不明な操作です。recoverは照会のみで再アップロードしません。DeleteはGitHub上のassetだけを削除します。</p><div id="media-operations" class="cards"></div></div>
+      <div class="panel"><div class="heading"><h2>staging履歴</h2><button id="media-operations-refresh" type="button" class="secondary">更新</button></div><p class="hint">Pendingは結果が不明な操作です。recoverは照会のみで再アップロードしません。GitHub上のasset削除が確定すると操作記録も消えます。</p><div id="media-operations" class="cards"></div></div>
     </section>
 
     <dialog id="reconnect-dialog">
