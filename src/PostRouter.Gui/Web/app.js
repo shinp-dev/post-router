@@ -6,6 +6,7 @@ let providers = [];
 let publicationItems = [];
 let pendingRequestId = crypto.randomUUID();
 let reconnectAccountId = null;
+let mediaCheckGeneration = 0;
 
 const byId = id => document.getElementById(id);
 const escapeState = value => String(value || "Unknown").replace(/[^A-Za-z]/g, "");
@@ -54,6 +55,70 @@ async function refreshAll() {
     renderProviders();
     renderPublications(publications);
   } catch (error) { showNotice(error.message, true); }
+}
+
+function setMediaCheckState(state) {
+  const node = byId("media-check-status");
+  node.textContent = state === "ok" ? "接続OK" : state === "failed" ? "接続失敗" : "未確認";
+  node.className = state === "ok" ? "media-check-status ok" :
+    state === "failed" ? "media-check-status failed" : "media-check-status";
+}
+
+function resetMediaCheckState() {
+  mediaCheckGeneration++;
+  setMediaCheckState("unchecked");
+}
+
+async function refreshMediaSettings() {
+  const settings = await request("/api/media/settings");
+  byId("media-owner").value = settings?.owner || "";
+  byId("media-repository").value = settings?.repository || "";
+  byId("media-tag").value = settings?.releaseTag || "";
+  byId("media-credential-status").textContent = settings?.credentialConfigured ? "PAT登録済み" : "PAT未登録";
+  byId("media-clear").disabled = !settings?.credentialConfigured;
+  byId("media-check").disabled = !settings?.credentialConfigured;
+  byId("media-stage-submit").disabled = !settings?.credentialConfigured;
+}
+
+async function refreshMediaOperations() {
+  const operations = await request("/api/media/operations");
+  const list = byId("media-operations"); list.replaceChildren();
+  for (const operation of operations) {
+    const card = document.createElement("div"); card.className = "account-card";
+    const title = document.createElement("h3"); title.textContent = `${operation.mediaType} / ${operation.status}`;
+    const details = document.createElement("dl");
+    addDefinition(details, "ID", operation.id);
+    addDefinition(details, "Size", `${operation.sizeBytes.toLocaleString()} bytes`);
+    addDefinition(details, "Created", formatTime(operation.createdAt));
+    addDefinition(details, "Logical expiry", formatTime(operation.expiresAt));
+    addDefinition(details, "Safe error", operation.lastErrorCode || "—");
+    if (operation.publicUrl) {
+      const url = new URL(operation.publicUrl);
+      if (url.protocol === "https:" && url.hostname === "github.com") {
+        const link = document.createElement("a"); link.href = url.href;
+        link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "公開URLを開く";
+        const dt = document.createElement("dt"); dt.textContent = "URL";
+        const dd = document.createElement("dd"); dd.append(link); details.append(dt, dd);
+      }
+    }
+    const actions = document.createElement("div"); actions.className = "actions";
+    if (operation.status === "Pending") actions.append(actionButton("recover（照会のみ）", async () => {
+      try {
+        const result = await request(`/api/media/operations/${operation.id}/recover`, { method: "POST", body: "{}" });
+        showNotice(result.status === "Staged" ? "公開assetを確認しました。" : "まだ公開assetを確認できません。再アップロードはしていません。");
+        await refreshMediaOperations();
+      } catch (error) { showNotice(error.message, true); }
+    }));
+    if (operation.status === "Staged") actions.append(actionButton("GitHub上のassetを削除", () => confirmAction(
+      "公開assetを削除", "GitHub Release上の公開assetを削除します。削除確定後、操作記録も消えます。", async () => {
+        try {
+          await request(`/api/media/operations/${operation.id}/delete`, { method: "POST", body: JSON.stringify({ confirmed: true }) });
+          showNotice("GitHub上の公開assetを削除しました。"); await refreshMediaOperations();
+        } catch (error) { showNotice(error.message, true); }
+      }), "danger"));
+    card.append(title, details, actions); list.append(card);
+  }
+  if (!operations.length) list.textContent = "staging履歴はありません。";
 }
 
 function renderDashboard(data) {
@@ -261,7 +326,11 @@ function confirmAction(title, message, action) {
   ok.onclick = async () => { dialog.close(); await action(); }; dialog.showModal();
 }
 
-document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => showView(button.dataset.view)));
+document.querySelectorAll(".nav").forEach(button => button.addEventListener("click", () => {
+  showView(button.dataset.view);
+  if (button.dataset.view === "settings") Promise.all([refreshMediaSettings(), refreshMediaOperations()])
+    .catch(error => showNotice(error.message, true));
+}));
 document.querySelectorAll(".refresh").forEach(button => button.addEventListener("click", refreshAll));
 byId("detail-close").addEventListener("click", () => byId("detail-dialog").close());
 byId("confirm-cancel").addEventListener("click", () => byId("confirm-dialog").close());
@@ -270,6 +339,75 @@ byId("post-text").addEventListener("input", event => { byId("text-count").textCo
 byId("post-account").addEventListener("change", updatePostCapability);
 byId("hide-published").addEventListener("change", () => renderPublications(publicationItems));
 byId("connect-provider").addEventListener("change", updateClientSecretField);
+byId("media-operations-refresh").addEventListener("click", () => refreshMediaOperations().catch(error => showNotice(error.message, true)));
+["media-owner", "media-repository", "media-tag", "media-token"].forEach(id =>
+  byId(id).addEventListener("input", resetMediaCheckState));
+byId("media-stage-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const file = byId("media-stage-file").files[0];
+  if (!file || file.size <= 0 || file.size > 2 * 1024 * 1024 * 1024 || !byId("media-stage-acknowledge").checked) {
+    showNotice("2 GiB以下の素材を選び、公開を確認してください。", true); return;
+  }
+  const button = byId("media-stage-submit");
+  button.disabled = true; button.textContent = "アップロード中…";
+  try {
+    const body = new FormData();
+    body.set("media", file); body.set("acknowledgePublic", "true");
+    body.set("expectedOwner", byId("media-owner").value.trim());
+    body.set("expectedRepository", byId("media-repository").value.trim());
+    body.set("expectedReleaseTag", byId("media-tag").value.trim());
+    const result = await request("/api/media/stage", { method: "POST", body });
+    byId("media-stage-file").value = ""; byId("media-stage-acknowledge").checked = false;
+    showNotice(result.lastErrorCode === "media_payload_cleanup_failed"
+      ? `公開操作ID: ${result.id}。一時素材の削除に失敗しました。履歴からrecoverを実行して再確認してください。`
+      : result.status === "Staged" ? `公開stageが完了しました。操作ID: ${result.id}` :
+        `結果が不明です。操作ID: ${result.id}。履歴からrecoverで照会してください。`,
+    result.status !== "Staged" || result.lastErrorCode === "media_payload_cleanup_failed");
+    await refreshMediaOperations();
+  } catch (error) {
+    showNotice(`${error.message} 履歴を更新して結果を確認してください。`, true);
+    await refreshMediaOperations().catch(refreshError => showNotice(refreshError.message, true));
+  }
+  finally {
+    button.textContent = "公開stage";
+    await refreshMediaSettings().catch(refreshError => showNotice(refreshError.message, true));
+  }
+});
+byId("media-settings-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await request("/api/media/settings", { method: "POST", body: JSON.stringify({
+      owner: byId("media-owner").value.trim(), repository: byId("media-repository").value.trim(),
+      releaseTag: byId("media-tag").value.trim() }) });
+    resetMediaCheckState(); await refreshMediaSettings(); showNotice("公開先を保存しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+byId("media-credential-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = byId("media-token");
+  const body = JSON.stringify({ token: input.value });
+  input.value = "";
+  try {
+    await request("/api/media/credential", { method: "POST", body });
+    resetMediaCheckState(); await refreshMediaSettings(); showNotice("PATをvaultへ登録しました。");
+  } catch (error) { showNotice(error.message, true); }
+});
+byId("media-clear").addEventListener("click", () => confirmAction("PATを削除", "ローカルのGitHub PATを削除します。公開assetは残り、PATを再登録するまで削除できません。", async () => {
+  try {
+    await request("/api/media/credential/clear", { method: "POST", body: "{}" });
+    resetMediaCheckState(); await refreshMediaSettings(); showNotice("PATを削除しました。");
+  } catch (error) { showNotice(error.message, true); }
+}));
+byId("media-check").addEventListener("click", async () => {
+  const generation = ++mediaCheckGeneration;
+  setMediaCheckState("unchecked");
+  try {
+    await request("/api/media/check", { method: "POST", body: "{}" });
+    if (generation === mediaCheckGeneration) setMediaCheckState("ok");
+  } catch {
+    if (generation === mediaCheckGeneration) setMediaCheckState("failed");
+  }
+});
 byId("reconnect-cancel").addEventListener("click", () => { byId("reconnect-client-secret-file").value = ""; byId("reconnect-dialog").close(); reconnectAccountId = null; });
 byId("reconnect-form").addEventListener("submit", event => {
   event.preventDefault();
@@ -343,6 +481,6 @@ byId("connect-form").addEventListener("submit", async event => {
 });
 
 (async () => {
-  try { csrfToken = (await request("/api/session")).csrfToken; await refreshAll(); window.setInterval(refreshAll, 10000); }
+  try { csrfToken = (await request("/api/session")).csrfToken; await refreshAll(); await refreshMediaSettings(); await refreshMediaOperations(); window.setInterval(refreshAll, 10000); }
   catch (error) { showNotice(error.message, true); }
 })();

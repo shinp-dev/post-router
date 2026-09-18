@@ -11,6 +11,116 @@ namespace PostRouter.Tests;
 public sealed class CliTests
 {
     [Fact]
+    public async Task Media_cli_requires_explicit_public_stage_and_remote_delete_confirmation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-media-guards", Guid.NewGuid().ToString("N"));
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var stage = await InvokeAsync(["--data-dir", directory, "media", "stage", "--file", "missing.jpg"]);
+            Assert.NotEqual(0, stage.ExitCode);
+            Assert.Contains("acknowledge-public", stage.Output, StringComparison.Ordinal);
+            var delete = await InvokeAsync(["--data-dir", directory, "media", "delete", Guid.NewGuid().ToString("D")]);
+            Assert.NotEqual(0, delete.ExitCode);
+            Assert.Contains("--confirm", delete.Output, StringComparison.Ordinal);
+            var list = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, list.ExitCode);
+            using var json = JsonDocument.Parse(list.Output);
+            Assert.Empty(json.RootElement.GetProperty("result").EnumerateArray());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Media_cli_list_and_show_exclude_removed_operation_record()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-media-list", Guid.NewGuid().ToString("N"));
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var id = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            var sha = new string('a', 64);
+            var staged = new StagedPublicAsset(new Uri("https://github.com/example/media/releases/download/staging/asset.jpg"),
+                new StagedPublicAssetHandle("opaque-handle"), now, now.AddHours(1), sha, 7);
+            var journal = new FilePublicMediaOperationStore(directory);
+            await journal.SaveAsync(new PublicMediaOperationRecord(id, sha, 7, "image/jpeg",
+                new PublicMediaStagingOperation("opaque-operation"), staged, now, now, null));
+            var before = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, before.ExitCode);
+            Assert.Contains(id.ToString("D"), before.Output, StringComparison.OrdinalIgnoreCase);
+
+            // The workflow removes the record only after the remote host confirms deletion.
+            await journal.DeleteAsync(id);
+            var list = await InvokeAsync(["--data-dir", directory, "media", "list"]);
+            Assert.Equal(0, list.ExitCode);
+            using var json = JsonDocument.Parse(list.Output);
+            Assert.Empty(json.RootElement.GetProperty("result").EnumerateArray());
+            var show = await InvokeAsync(["--data-dir", directory, "media", "show", id.ToString("D")]);
+            Assert.Equal(6, show.ExitCode);
+            Assert.Contains("\"code\":\"not_found\"", show.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory)) try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Media_cli_registers_pat_from_stdin_without_echo_or_plaintext_storage()
+    {
+        const string pat = "github-cli-pat-secret-marker";
+        var directory = Path.Combine(Path.GetTempPath(), "post-router-cli-media-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var previousProfile = Environment.GetEnvironmentVariable("POST_ROUTER_PROFILE");
+        var previousInput = Console.In;
+        Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", "test");
+        try
+        {
+            var configured = await InvokeAsync(["--data-dir", directory, "media", "configure",
+                "--owner", "example", "--repository", "media", "--tag", "staging"]);
+            Assert.Equal(0, configured.ExitCode);
+            Console.SetIn(new StringReader(pat + " invalid" + Environment.NewLine));
+            var rejected = await InvokeAsync(["--data-dir", directory, "media", "credential", "set", "--token-stdin"]);
+            Assert.NotEqual(0, rejected.ExitCode);
+            Assert.DoesNotContain(pat, rejected.Output, StringComparison.Ordinal);
+            Console.SetIn(new StringReader(pat + Environment.NewLine));
+            var registered = await InvokeAsync(["--data-dir", directory, "media", "credential", "set", "--token-stdin"]);
+            Assert.Equal(0, registered.ExitCode);
+            Assert.DoesNotContain(pat, registered.Output, StringComparison.Ordinal);
+            var status = await InvokeAsync(["--data-dir", directory, "media", "status"]);
+            Assert.Equal(0, status.ExitCode);
+            Assert.Contains("\"credentialConfigured\":true", status.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(pat, status.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(pat, await File.ReadAllTextAsync(Path.Combine(directory, "github-media-settings.json")), StringComparison.Ordinal);
+            await using var runtime = await RuntimeFactory.CreateAsync(directory);
+            var settings = await new FileGitHubMediaConfigurationStore(directory).ReadAsync();
+            Assert.NotNull(settings?.CredentialBlobId);
+            Assert.Equal(pat, System.Text.Encoding.UTF8.GetString(await runtime.Store.GetAsync(
+                settings.CredentialBlobId!, GitHubMediaConfigurationService.CredentialPurpose)));
+            var cleared = await InvokeAsync(["--data-dir", directory, "media", "credential", "clear"]);
+            Assert.Equal(0, cleared.ExitCode);
+            Assert.Contains("\"credentialConfigured\":false", cleared.Output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetIn(previousInput);
+            Environment.SetEnvironmentVariable("POST_ROUTER_PROFILE", previousProfile);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
     public async Task Connect_accepts_absolute_loopback_redirect_before_provider_lookup()
     {
         var result = await InvokeConnectAsync("unregistered", "http://127.0.0.1:8765/callback");

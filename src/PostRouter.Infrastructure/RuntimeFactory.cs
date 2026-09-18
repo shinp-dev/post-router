@@ -21,6 +21,8 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     {
         DataDirectory = dataDirectory;
         Store = store;
+        var mediaJournal = new FilePublicMediaOperationStore(dataDirectory);
+        GitHubMedia = new GitHubMediaConfigurationService(new FileGitHubMediaConfigurationStore(dataDirectory), store, mediaJournal);
         FakeProvider = fakeProvider;
         MaintenanceGate = maintenanceGate;
         _protector = protector;
@@ -54,10 +56,41 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         var spoolDirectory = Path.Combine(dataDirectory, "spool");
         Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, spoolDirectory), applicationStore, TimeProvider.System);
         Spool = new SpoolStore(spoolDirectory);
+        MediaOperations = new PublicMediaOperations(new TemporaryPublicMediaPayloadStore(dataDirectory), mediaJournal);
     }
 
     public string DataDirectory { get; }
     public SqliteStore Store { get; }
+    public GitHubMediaConfigurationService GitHubMedia { get; }
+
+    public async Task<GitHubReleaseMediaHost> CreateGitHubMediaHostAsync(CancellationToken cancellationToken = default)
+    {
+        var settings = await new FileGitHubMediaConfigurationStore(DataDirectory).ReadAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("github_media_settings_missing");
+        if (settings.CredentialBlobId is null)
+            throw new InvalidOperationException("github_media_credential_missing");
+        return GitHubReleaseMediaHost.CreateProduction(
+            new GitHubReleaseMediaHostOptions(settings.Owner, settings.Repository, settings.ReleaseTag),
+            new VaultGitHubMediaTokenSource(Store, settings.CredentialBlobId));
+    }
+
+    public async Task<PublicMediaOperationView> StageGitHubMediaAsync(string sourcePath,
+        Func<CancellationToken, Task<GitHubReleaseMediaHost>> createHost,
+        GitHubMediaConfigurationStatus? expectedTarget = null, CancellationToken cancellationToken = default)
+    {
+        var settingsStore = new FileGitHubMediaConfigurationStore(DataDirectory);
+        await using var lease = await settingsStore.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        var settings = await settingsStore.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("github_media_settings_missing");
+        if (expectedTarget is not null
+            && (!string.Equals(settings.Owner, expectedTarget.Owner, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(settings.Repository, expectedTarget.Repository, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(settings.ReleaseTag, expectedTarget.ReleaseTag, StringComparison.Ordinal)))
+            throw new InvalidOperationException("github_media_settings_changed");
+        using var host = await createHost(cancellationToken).ConfigureAwait(false);
+        await host.CheckConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await MediaOperations.StageAsync(sourcePath, host, cancellationToken).ConfigureAwait(false);
+    }
     public PublicationApprovalStore Approvals { get; }
     public FakeProvider FakeProvider { get; }
     public FileMaintenanceGate MaintenanceGate { get; }
@@ -69,6 +102,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     public StatsService Stats { get; }
     public MaintenanceService Maintenance { get; }
     public SpoolStore Spool { get; }
+    public PublicMediaOperations MediaOperations { get; }
 
     public async ValueTask DisposeAsync()
     {

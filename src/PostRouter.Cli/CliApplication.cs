@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -30,6 +31,7 @@ public static class CliApplication
         root.Subcommands.Add(BuildDoctor(dataDirectory));
         root.Subcommands.Add(BuildDatabase(dataDirectory));
         root.Subcommands.Add(BuildAccount(dataDirectory));
+        root.Subcommands.Add(BuildMedia(dataDirectory));
         root.Subcommands.Add(BuildGui(dataDirectory));
         return root.Parse(args).InvokeAsync();
     }
@@ -358,6 +360,164 @@ public static class CliApplication
         return account;
     }
 
+    private static Command BuildMedia(Option<string?> dataDirectory)
+    {
+        var media = new Command("media", "Configure GitHub temporary public media staging");
+        var configure = new Command("configure", "Save a target public GitHub Release");
+        var owner = new Option<string>("--owner") { Required = true };
+        var repository = new Option<string>("--repository") { Required = true };
+        var tag = new Option<string>("--tag") { Required = true };
+        configure.Options.Add(owner); configure.Options.Add(repository); configure.Options.Add(tag);
+        configure.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.GitHubMedia.ConfigureAsync(result.GetValue(owner)!, result.GetValue(repository)!, result.GetValue(tag)!, token);
+        }));
+
+        var status = new Command("status", "Show the target and credential presence without exposing the credential");
+        status.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.GitHubMedia.StatusAsync(token) ?? throw new InvalidOperationException("github_media_settings_missing");
+        }));
+
+        var credential = new Command("credential", "Manage the GitHub fine-grained PAT in the local vault");
+        var set = new Command("set", "Read a PAT from a hidden prompt or standard input");
+        var tokenStdin = new Option<bool>("--token-stdin") { Description = "Read one PAT line from standard input; do not pass it as an argument" };
+        set.Options.Add(tokenStdin);
+        set.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var bytes = await ReadGitHubTokenAsync(result.GetValue(tokenStdin), token);
+            try { return await runtime.GitHubMedia.SetCredentialAsync(bytes, token); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }));
+        var clear = new Command("clear", "Remove the local PAT; public assets remain until separately deleted");
+        clear.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.GitHubMedia.ClearCredentialAsync(token);
+        }));
+        credential.Subcommands.Add(set); credential.Subcommands.Add(clear);
+
+        var check = new Command("check", "Verify access to the configured public Release without uploading");
+        check.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            using var host = await runtime.CreateGitHubMediaHostAsync(token);
+            await host.CheckConnectionAsync(token);
+            return new { reachable = true };
+        }));
+        var stage = new Command("stage", "Upload one JPEG or MP4 as a public Release Asset");
+        var mediaFile = new Option<FileInfo>("--file") { Required = true };
+        var acknowledgePublic = new Option<bool>("--acknowledge-public")
+        {
+            Description = "Acknowledge that the asset is public until explicitly deleted"
+        };
+        stage.Options.Add(mediaFile); stage.Options.Add(acknowledgePublic);
+        stage.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            if (!result.GetValue(acknowledgePublic))
+                throw new ArgumentException("--acknowledge-public is required before staging media.");
+            var file = result.GetValue(mediaFile)!;
+            if (file.Exists && file.Length > 2L * 1024 * 1024 * 1024)
+                throw new InvalidDataException("Media exceeds the 2 GiB staging limit.");
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.StageGitHubMediaAsync(file.FullName, runtime.CreateGitHubMediaHostAsync, cancellationToken: token);
+        }, pendingIsIncomplete: true));
+        var list = new Command("list", "List local staging operations, including uncertain outcomes");
+        list.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.MediaOperations.ListAsync(token);
+        }));
+        var show = new Command("show", "Show one staging operation without exposing its local file path");
+        var showId = new Argument<Guid>("id");
+        show.Arguments.Add(showId);
+        show.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            return await runtime.MediaOperations.GetAsync(result.GetValue(showId), token);
+        }));
+        var recover = new Command("recover", "Look up an uncertain upload without uploading again");
+        var recoverId = new Argument<Guid>("id");
+        recover.Arguments.Add(recoverId);
+        recover.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            var current = await runtime.MediaOperations.GetAsync(result.GetValue(recoverId), token);
+            if (current.Status != "Pending") return current;
+            using var host = await runtime.CreateGitHubMediaHostAsync(token);
+            return await runtime.MediaOperations.RecoverAsync(result.GetValue(recoverId), host, token);
+        }, pendingIsIncomplete: true));
+        var delete = new Command("delete", "Delete the remote Release Asset and its local operation record");
+        var deleteId = new Argument<Guid>("id");
+        var confirmDelete = new Option<bool>("--confirm") { Description = "Confirm deletion of the remote Release Asset" };
+        delete.Arguments.Add(deleteId); delete.Options.Add(confirmDelete);
+        delete.SetAction((result, token) => ExecuteAsync(async () =>
+        {
+            if (!result.GetValue(confirmDelete)) throw new ArgumentException("--confirm is required to delete a staged asset.");
+            await using var runtime = await RuntimeFactory.CreateAsync(result.GetValue(dataDirectory), cancellationToken: token);
+            using var host = await runtime.CreateGitHubMediaHostAsync(token);
+            return await runtime.MediaOperations.DeleteAsync(result.GetValue(deleteId), host, token);
+        }));
+        media.Subcommands.Add(configure); media.Subcommands.Add(status);
+        media.Subcommands.Add(credential); media.Subcommands.Add(check);
+        media.Subcommands.Add(stage); media.Subcommands.Add(list); media.Subcommands.Add(show);
+        media.Subcommands.Add(recover); media.Subcommands.Add(delete);
+        return media;
+    }
+
+    private static async Task<byte[]> ReadGitHubTokenAsync(bool fromStdin, CancellationToken cancellationToken)
+    {
+        var bytes = new byte[1024];
+        var length = 0;
+        if (fromStdin)
+        {
+            var character = new char[1];
+            try
+            {
+                while (await Console.In.ReadAsync(character.AsMemory(), cancellationToken) != 0)
+                {
+                    if (character[0] == '\n') break;
+                    if (character[0] == '\r') continue;
+                    if (character[0] is < '!' or > '~' || length == bytes.Length)
+                        throw new ArgumentException("GitHub credential is invalid.");
+                    bytes[length++] = (byte)character[0];
+                }
+                return bytes.AsSpan(0, length).ToArray();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(bytes);
+                Array.Clear(character);
+            }
+        }
+        if (Console.IsInputRedirected) throw new ArgumentException("Use --token-stdin when reading a GitHub credential from standard input.");
+        Console.Error.Write("GitHub PAT: ");
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var key = Console.ReadKey(intercept: true);
+                if (key.Key == ConsoleKey.Enter) break;
+                if (key.Key == ConsoleKey.Backspace)
+                {
+                    if (length > 0) bytes[--length] = 0;
+                    continue;
+                }
+                if (key.KeyChar is >= '!' and <= '~' && length < bytes.Length) bytes[length++] = (byte)key.KeyChar;
+            }
+            return bytes.AsSpan(0, length).ToArray();
+        }
+        finally
+        {
+            Console.Error.WriteLine();
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
     private static Command BuildDisconnectCommand(string name, string description, Option<string?> dataDirectory)
     {
         var command = new Command(name, description);
@@ -445,9 +605,17 @@ public static class CliApplication
         return result;
     }
 
-    private static async Task<int> ExecuteAsync(Func<Task<object>> action)
+    private static async Task<int> ExecuteAsync(Func<Task<object>> action, bool pendingIsIncomplete = false)
     {
-        try { WriteSuccess(await action()); return 0; }
+        try
+        {
+            var result = await action();
+            var pending = pendingIsIncomplete && result is PublicMediaOperationView { Status: "Pending" };
+            var cleanupFailed = result is PublicMediaOperationView { LastErrorCode: "media_payload_cleanup_failed" };
+            WriteSuccess(result, cleanupFailed ? ["media_payload_cleanup_failed"] :
+                pending ? ["media_result_pending_recover_required"] : []);
+            return pending || cleanupFailed ? 7 : 0;
+        }
         catch (ArgumentException ex) { WriteError("invalid_input", ex.Message); return 2; }
         catch (PlatformNotSupportedException ex) { WriteError("platform", ex.Message); return 3; }
         catch (NotSupportedException ex) { WriteError("unsupported", ex.Message); return 2; }
@@ -460,9 +628,10 @@ public static class CliApplication
         catch (IOException) { WriteError("io_error", "A required local file operation failed."); return 7; }
         catch (JsonException) { WriteError("invalid_json", "A JSON document is malformed or incompatible."); return 2; }
         catch (ProviderOperationException ex) { WriteError("provider_error", ex.SafeCode); return ex.Retryable ? 7 : 2; }
+        catch (TemporaryPublicMediaException ex) { WriteError(ex.Code, "GitHub media operation could not be completed."); return 7; }
         catch (Exception ex) { WriteError("internal_error", ex.GetType().Name); return 1; }
     }
 
-    private static void WriteSuccess(object result) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result, warnings = Array.Empty<string>(), error = (object?)null }, JsonOptions));
+    private static void WriteSuccess(object result, string[] warnings) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result, warnings, error = (object?)null }, JsonOptions));
     private static void WriteError(string code, string message) => Console.Out.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, requestId = Guid.NewGuid(), result = (object?)null, warnings = Array.Empty<string>(), error = new { code, message } }, JsonOptions));
 }

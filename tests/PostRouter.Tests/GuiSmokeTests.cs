@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using PostRouter.Application;
 using PostRouter.Domain;
 using PostRouter.Gui;
@@ -12,6 +13,179 @@ namespace PostRouter.Tests;
 
 public sealed class GuiSmokeTests
 {
+    [Fact]
+    public async Task Media_gui_stages_recovers_and_deletes_through_http_without_duplicate_upload()
+    {
+        using var github = new FakeGitHubMediaServer();
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync(_ => Task.FromResult(new GitHubReleaseMediaHost(
+            new GitHubReleaseMediaHostOptions("example", "media", "staging"),
+            new FakeGitHubMediaTokens(), github.Client, github.Client, TimeProvider.System)));
+        using var configured = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging"
+        });
+        Assert.Equal(HttpStatusCode.OK, configured.StatusCode);
+
+        using var staleForm = new MultipartFormDataContent();
+        var staleImage = new ByteArrayContent([0xff, 0xd8, 0xff, 1]);
+        staleImage.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+        staleForm.Add(staleImage, "media", "private-original.jpg");
+        staleForm.Add(new StringContent("true"), "acknowledgePublic");
+        staleForm.Add(new StringContent("example"), "expectedOwner");
+        staleForm.Add(new StringContent("media"), "expectedRepository");
+        staleForm.Add(new StringContent("different-tag"), "expectedReleaseTag");
+        using var staleResponse = await setup.PostFormAsync("/api/media/stage", staleForm);
+        Assert.Equal(HttpStatusCode.Conflict, staleResponse.StatusCode);
+        Assert.Equal(0, github.UploadCalls);
+
+        using var form = new MultipartFormDataContent();
+        var image = new ByteArrayContent([0xff, 0xd8, 0xff, 1, 2, 3, 4]);
+        image.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+        form.Add(image, "media", "private-original.jpg");
+        form.Add(new StringContent("true"), "acknowledgePublic");
+        form.Add(new StringContent("example"), "expectedOwner");
+        form.Add(new StringContent("media"), "expectedRepository");
+        form.Add(new StringContent("staging"), "expectedReleaseTag");
+        using var stagedResponse = await setup.PostFormAsync("/api/media/stage", form);
+        Assert.Equal(HttpStatusCode.OK, stagedResponse.StatusCode);
+        var stagedBody = await stagedResponse.Content.ReadAsStringAsync();
+        using var stagedJson = JsonDocument.Parse(stagedBody);
+        Assert.Equal("Pending", stagedJson.RootElement.GetProperty("status").GetString());
+        Assert.Equal("github_upload_outcome_unknown", stagedJson.RootElement.GetProperty("lastErrorCode").GetString());
+        Assert.DoesNotContain("private-original", stagedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(setup.Directory, stagedBody, StringComparison.OrdinalIgnoreCase);
+        var id = stagedJson.RootElement.GetProperty("id").GetGuid();
+        Assert.Equal(1, github.UploadCalls);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(setup.Directory, "media-staging-payload")));
+        Assert.True(File.Exists(Path.Combine(setup.Directory, "github-media-operations", $"{id:N}.json")));
+        using var blockedChange = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "other-tag"
+        });
+        Assert.Equal(HttpStatusCode.Conflict, blockedChange.StatusCode);
+
+        github.MakeAssetAvailable();
+        using var recoveredResponse = await setup.PostAsync($"/api/media/operations/{id:D}/recover", new { });
+        Assert.Equal(HttpStatusCode.OK, recoveredResponse.StatusCode);
+        var recoveredBody = await recoveredResponse.Content.ReadAsStringAsync();
+        Assert.Contains("\"status\":\"Staged\"", recoveredBody, StringComparison.Ordinal);
+        Assert.Contains("https://github.com/example/media/releases/download/staging/", recoveredBody, StringComparison.Ordinal);
+        Assert.Equal(1, github.UploadCalls);
+
+        using var unconfirmed = await setup.PostAsync($"/api/media/operations/{id:D}/delete", new { });
+        Assert.Equal(HttpStatusCode.BadRequest, unconfirmed.StatusCode);
+        Assert.Equal(0, github.DeleteCalls);
+        using var deletedResponse = await setup.PostAsync($"/api/media/operations/{id:D}/delete", new { confirmed = true });
+        Assert.Equal(HttpStatusCode.OK, deletedResponse.StatusCode);
+        Assert.Contains("\"status\":\"Deleted\"", await deletedResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(1, github.DeleteCalls);
+        Assert.False(File.Exists(Path.Combine(setup.Directory, "github-media-operations", $"{id:N}.json")));
+        using var allowedChange = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "other-tag"
+        });
+        Assert.Equal(HttpStatusCode.OK, allowedChange.StatusCode);
+        using var history = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/media/operations"));
+        Assert.Empty(history.RootElement.EnumerateArray());
+        using var missing = await setup.Client.GetAsync($"/api/media/operations/{id:D}");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
+    public async Task GitHub_media_settings_keep_pat_in_vault_and_never_return_it_to_browser()
+    {
+        const string pat = "github-test-pat-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        var html = await setup.Client.GetStringAsync("/");
+        var script = await setup.Client.GetStringAsync("/app.js");
+        Assert.Contains("GitHub一時公開メディア", html, StringComparison.Ordinal);
+        Assert.Contains("type=\"password\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("localStorage", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionStorage", script, StringComparison.Ordinal);
+
+        using var initial = await setup.Client.GetAsync("/api/media/settings");
+        Assert.Contains("\"credentialConfigured\":false", await initial.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var csrfRejected = await setup.Client.PostAsJsonAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging"
+        });
+        Assert.Equal(HttpStatusCode.Forbidden, csrfRejected.StatusCode);
+
+        using var configured = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging"
+        });
+        Assert.Equal(HttpStatusCode.OK, configured.StatusCode);
+        using var invalidCredential = await setup.PostAsync("/api/media/credential", new { token = pat + " invalid" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidCredential.StatusCode);
+        Assert.DoesNotContain(pat, await invalidCredential.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var registered = await setup.PostAsync("/api/media/credential", new { token = pat });
+        Assert.Equal(HttpStatusCode.OK, registered.StatusCode);
+        Assert.DoesNotContain(pat, await registered.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        var status = await setup.Client.GetStringAsync("/api/media/settings");
+        Assert.Contains("\"credentialConfigured\":true", status, StringComparison.Ordinal);
+        Assert.DoesNotContain(pat, status, StringComparison.Ordinal);
+        Assert.DoesNotContain("credentialBlobId", status, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(pat, await File.ReadAllTextAsync(Path.Combine(setup.Directory, "github-media-settings.json")), StringComparison.Ordinal);
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(setup.Directory, "post-router.db"),
+            Mode = SqliteOpenMode.ReadOnly
+        }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT ciphertext FROM vault_blobs WHERE purpose='github-media-staging-token'";
+            var ciphertext = (byte[])(await command.ExecuteScalarAsync())!;
+            Assert.False(ciphertext.AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(pat)));
+        }
+
+        using var retagged = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "media",
+            releaseTag = "staging-2"
+        });
+        Assert.Contains("\"credentialConfigured\":true", await retagged.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var changed = await setup.PostAsync("/api/media/settings", new
+        {
+            owner = "example",
+            repository = "other",
+            releaseTag = "staging"
+        });
+        Assert.Contains("\"credentialConfigured\":false", await changed.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Media_gui_exposes_staging_controls_and_requires_csrf_for_mutations()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        var html = await setup.Client.GetStringAsync("/");
+        var script = await setup.Client.GetStringAsync("/app.js");
+        Assert.Contains("media-stage-acknowledge", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"media-check-status\"", html, StringComparison.Ordinal);
+        Assert.Contains("aria-live=\"polite\"", html, StringComparison.Ordinal);
+        Assert.Contains("recover（照会のみ）", script, StringComparison.Ordinal);
+        Assert.Contains("GitHub上のassetを削除", script, StringComparison.Ordinal);
+        using var list = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/media/operations"));
+        Assert.Empty(list.RootElement.EnumerateArray());
+        using var unverified = await setup.Client.PostAsJsonAsync($"/api/media/operations/{Guid.NewGuid():D}/delete", new { });
+        Assert.Equal(HttpStatusCode.Forbidden, unverified.StatusCode);
+    }
+
     [Fact]
     public async Task Gui_starts_and_serves_dashboard_create_list_detail_and_unknown_state()
     {
@@ -391,9 +565,11 @@ JOIN targets target ON target.post_id=post.id WHERE post.id=$id
             return new(directory, runtime, previousProfile, previousKey);
         }
 
-        public async Task StartGuiAsync()
+        public async Task StartGuiAsync(Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost = null)
         {
-            _host = await GuiApplication.StartAsync(new GuiOptions(Directory, 0, false));
+            _host = createMediaHost is null
+                ? await GuiApplication.StartAsync(new GuiOptions(Directory, 0, false))
+                : await GuiApplication.StartForTestsAsync(new GuiOptions(Directory, 0, false), createMediaHost);
             Client.BaseAddress = _host.Address;
             using var session = JsonDocument.Parse(await Client.GetStringAsync("/api/session"));
             CsrfToken = session.RootElement.GetProperty("csrfToken").GetString()!;
@@ -446,6 +622,78 @@ JOIN targets target ON target.post_id=post.id WHERE post.id=$id
             Environment.SetEnvironmentVariable("POST_ROUTER_TEST_MASTER_KEY", _previousKey);
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try { System.IO.Directory.Delete(Directory, true); } catch (IOException) { }
+        }
+    }
+
+    private sealed class FakeGitHubMediaTokens : IGitHubMediaTokenSource
+    {
+        public Task<byte[]> GetTokenAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(Encoding.ASCII.GetBytes("fake-media-token"));
+    }
+
+    private sealed class FakeGitHubMediaServer : HttpMessageHandler
+    {
+        private string _assetName = "";
+        private long _assetSize;
+        private bool _available;
+        public HttpClient Client { get; }
+        public int UploadCalls { get; private set; }
+        public int DeleteCalls { get; private set; }
+
+        public FakeGitHubMediaServer() => Client = new HttpClient(this, disposeHandler: false);
+
+        public void MakeAssetAvailable() => _available = true;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            Assert.Equal("fake-media-token", request.Headers.Authorization?.Parameter);
+            var uri = request.RequestUri!;
+            if (uri.Host == "api.github.com" && uri.AbsolutePath == "/repos/example/media")
+                return Json(HttpStatusCode.OK, "{\"full_name\":\"example/media\",\"private\":false}");
+            if (uri.Host == "api.github.com" && uri.AbsolutePath == "/repos/example/media/releases/tags/staging")
+                return Json(HttpStatusCode.OK, "{\"id\":42,\"tag_name\":\"staging\",\"draft\":false}");
+            if (uri.Host == "api.github.com" && uri.AbsolutePath == "/repos/example/media/releases/42/assets")
+                return Json(HttpStatusCode.OK, _available ? $"[{AssetJson()}]" : "[]");
+            if (uri.Host == "uploads.github.com" && request.Method == HttpMethod.Post)
+            {
+                UploadCalls++;
+                _assetName = Uri.UnescapeDataString(uri.Query["?name=".Length..]);
+                _assetSize = (await request.Content!.ReadAsByteArrayAsync(cancellationToken)).LongLength;
+                throw new HttpRequestException("fake-media-token private diagnostic");
+            }
+            if (uri.Host == "api.github.com" && uri.AbsolutePath == "/repos/example/media/releases/assets/555")
+            {
+                if (request.Method == HttpMethod.Get)
+                    return _available ? Json(HttpStatusCode.OK, AssetJson()) : Json(HttpStatusCode.NotFound, "{}");
+                if (request.Method == HttpMethod.Delete)
+                {
+                    DeleteCalls++;
+                    _available = false;
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                }
+            }
+            throw new InvalidOperationException("Unexpected fake GitHub request.");
+        }
+
+        private string AssetJson() => JsonSerializer.Serialize(new
+        {
+            id = 555,
+            name = _assetName,
+            state = "uploaded",
+            size = _assetSize,
+            browser_download_url = $"https://github.com/example/media/releases/download/staging/{_assetName}"
+        });
+
+        private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) Client.Dispose();
+            base.Dispose(disposing);
         }
     }
 }
