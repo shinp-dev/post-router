@@ -96,8 +96,6 @@ public sealed class InstagramOAuthTests
         }
         Assert.DoesNotContain(secret, material!.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("instagram-long-marker", material.ToString(), StringComparison.Ordinal);
-        Assert.Empty(new InstagramConnectionOnlyAdapter().Capabilities.ContentKinds);
-        Assert.Throws<NotSupportedException>(() => new InstagramConnectionOnlyAdapter().Validate(null!, null!));
     }
 
     [Fact]

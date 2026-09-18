@@ -31,12 +31,29 @@ public sealed class PublicMediaOperations(ITemporaryPublicMediaPayloadStore payl
 
     public async Task<PublicMediaOperationView> StageAsync(string sourcePath, ITemporaryPublicMediaHost host,
         CancellationToken cancellationToken = default)
+        => await StageAsync(Guid.NewGuid(), sourcePath, host, cancellationToken).ConfigureAwait(false);
+
+    // A publication supplies its durable ID. An existing journal entry is only recovered,
+    // never uploaded again after a lost response or a worker restart.
+    public async Task<PublicMediaOperationView> StageAsync(Guid id, string sourcePath, ITemporaryPublicMediaHost host,
+        CancellationToken cancellationToken = default)
     {
-        var id = Guid.NewGuid();
         MediaAsset? source = null;
         PublicMediaOperationRecord? record = null;
         var cleanupFailedWithoutRecord = false;
         await using var lease = await journal.AcquireAsync(id, cancellationToken).ConfigureAwait(false);
+        record = await journal.ReadAsync(id, cancellationToken).ConfigureAwait(false);
+        if (record is not null)
+        {
+            if (record.Staged is not null) return View(record);
+            var recovered = await host.RecoverAsync(record.Operation, cancellationToken).ConfigureAwait(false);
+            if (recovered is not null)
+            {
+                record = record with { Staged = recovered, LastErrorCode = null, UpdatedAt = DateTimeOffset.UtcNow };
+                await journal.SaveAsync(record, cancellationToken).ConfigureAwait(false);
+            }
+            return View(record);
+        }
         try
         {
             source = await payloads.ImportAsync(id, sourcePath, cancellationToken).ConfigureAwait(false);

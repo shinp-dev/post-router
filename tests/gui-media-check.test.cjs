@@ -56,7 +56,7 @@ function setup() {
       open() { return { location: { replace() {} }, close() {} }; },
     }, URL,
   };
-  vm.runInNewContext(script + "\nglobalThis.testInstagram = { refreshInstagramSettings, startInstagramFlow };", sandbox,
+  vm.runInNewContext(script + "\nglobalThis.testInstagram = { refreshInstagramSettings, startInstagramFlow, updatePostCapability, setPostContext(account, capability) { accounts = [account]; providers = [capability]; } };", sandbox,
     { filename: scriptPath });
   return {
     element, requests,
@@ -65,12 +65,36 @@ function setup() {
     async refreshInstagram() { await sandbox.testInstagram.refreshInstagramSettings(); },
     async startInstagram() { await sandbox.testInstagram.startInstagramFlow("/api/instagram/connect"); },
     async tickInstagram() { await intervalCallback(); },
+    setPostContext(account, capability) { sandbox.testInstagram.setPostContext(account, capability); sandbox.testInstagram.updatePostCapability(); },
     async fire(id, eventName) {
       await element(id).listeners[eventName]({ preventDefault() {} });
     },
     status() { return element("media-check-status").textContent; },
   };
 }
+
+test("Instagram Reel form shows only Instagram fields and submits caption plus share setting", async () => {
+  const ui = setup();
+  ui.element("post-account").value = "instagram-account";
+  ui.setPostContext({ accountId: "instagram-account", provider: "instagram" },
+    { providerKey: "instagram", contentKinds: ["Video"] });
+  assert.equal(ui.element("post-video").required, true);
+  assert.equal(ui.element("instagram-caption-field").hidden, false);
+  assert.equal(ui.element("instagram-share-field").hidden, false);
+  for (const id of ["title-field", "kids-field", "synthetic-field", "visibility-field", "upload-notice-field"])
+    assert.equal(ui.element(id).hidden, true);
+  assert.equal(ui.element("schedule-toggle").hidden, false);
+  ui.element("post-video").files = [new Blob([new Uint8Array(1024)], { type: "video/mp4" })];
+  ui.element("post-instagram-caption").value = "A test Reel";
+  ui.element("post-instagram-share").checked = false;
+  ui.element("post-images").files = [];
+  await ui.fire("post-form", "submit");
+  const submitted = ui.requests.find(item => item.url === "/api/posts/instagram-reel");
+  assert.ok(submitted);
+  assert.equal(submitted.options.body.get("caption"), "A test Reel");
+  assert.equal(submitted.options.body.get("shareToFeed"), "false");
+  assert.equal(submitted.options.body.get("video").size, 1024);
+});
 
 test("connection check shows local success and failure without server error or token text", async () => {
   const ui = setup();

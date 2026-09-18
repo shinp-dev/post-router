@@ -174,25 +174,30 @@ function updateClientSecretField() {
 function updatePostCapability() {
   const account = accounts.find(item => item.accountId === byId("post-account").value);
   const capability = providers.find(item => item.providerKey === account?.provider);
-  const video = capability?.contentKinds.includes("Video") === true && capability?.contentKinds.includes("TextOnly") !== true;
+  const youtubeVideo = account?.provider === "youtube" && capability?.contentKinds.includes("Video") === true;
+  const instagramReel = account?.provider === "instagram" && capability?.contentKinds.includes("Video") === true;
+  const video = youtubeVideo || instagramReel;
   const images = capability?.contentKinds.includes("ImageSet") === true && !video;
   byId("text-field").hidden = video;
   byId("post-text").required = !video;
   byId("image-field").hidden = !images;
   if (!images) byId("post-images").value = "";
-  for (const id of ["video-field", "title-field", "description-field", "kids-field", "synthetic-field", "visibility-field", "upload-notice-field"])
-    byId(id).hidden = !video;
+  byId("video-field").hidden = !video;
+  for (const id of ["title-field", "description-field", "kids-field", "synthetic-field", "visibility-field", "upload-notice-field"])
+    byId(id).hidden = !youtubeVideo;
+  byId("instagram-caption-field").hidden = !instagramReel;
+  byId("instagram-share-field").hidden = !instagramReel;
   byId("post-video").required = video;
-  byId("post-title").required = video;
-  byId("post-made-for-kids").required = video;
-  byId("post-upload-notice").required = video;
+  byId("post-title").required = youtubeVideo;
+  byId("post-made-for-kids").required = youtubeVideo;
+  byId("post-upload-notice").required = youtubeVideo;
   if (!video) {
     byId("post-video").value = "";
     byId("post-made-for-kids").value = "";
     byId("post-upload-notice").checked = false;
   }
-  byId("schedule-toggle").hidden = video;
-  if (video) { byId("schedule-enabled").checked = false; byId("schedule-field").hidden = true; byId("post-at").required = false; }
+  byId("schedule-toggle").hidden = youtubeVideo;
+  if (youtubeVideo) { byId("schedule-enabled").checked = false; byId("schedule-field").hidden = true; byId("post-at").required = false; }
 }
 
 function renderPublications(items) {
@@ -253,12 +258,29 @@ async function openDetail(id) {
       request(`/api/publications/${id}/approval`)
     ]);
     const content = byId("detail-content"); content.replaceChildren();
-    if (detail.summary.publicationState === "Unknown") addAlert(content, "投稿された可能性があります。自動再投稿は行われず、照合でも確定できない場合があります。", false);
+    if (detail.summary.provider === "instagram" &&
+        ["Unknown", "NeedsAttention"].includes(detail.summary.publicationState) &&
+        /instagram_(publish|container)/.test(detail.summary.safeError || ""))
+      addAlert(content, "Instagramの公開結果を自動確認できません。Reelを確認し、同じ投稿を再送しないでください。", false);
+    else if (detail.summary.publicationState === "Unknown")
+      addAlert(content, "投稿された可能性があります。自動再投稿は行われず、照合でも確定できない場合があります。", false);
     if (detail.summary.publicationState === "AwaitingApproval") addAlert(content, "公開前で停止しています。内容と公開先を確認してから承認してください。", false);
     const text = document.createElement("p"); text.className = "full-text"; text.textContent = detail.text || "";
     const dl = document.createElement("dl");
     addDefinition(dl, "Provider / Account", `${detail.summary.provider} / ${detail.summary.accountAlias}`);
     addDefinition(dl, "Publication", detail.summary.publicationState);
+    if (detail.summary.provider === "instagram") {
+      const state = detail.summary.publicationState;
+      const phase = state === "Published" ? "公開済み" :
+        ["Unknown", "NeedsAttention"].includes(state) ? "公開結果・状態の確認が必要" :
+        state === "Publishing" ? "公開処理中" :
+        state === "Ready" && detail.containerId ? "公開準備完了" :
+        state === "Processing" && detail.summary.remoteId ? "一時公開素材を削除中" :
+        state === "Processing" ? "Instagramが動画取得中" : "ステージング中";
+      addDefinition(dl, "Instagram Reel", phase);
+      addDefinition(dl, "Container ID", detail.containerId || "—");
+      addDefinition(dl, "Media ID", detail.summary.remoteId || "—");
+    }
     addDefinition(dl, "Approval", approval.policy === "RequireApproval" ? (approval.approved ? "Approved" : "Required") : "Automatic");
     addDefinition(dl, "Queue", detail.summary.jobState ? `${detail.summary.jobKind} / ${detail.summary.jobState}` : "—");
     addDefinition(dl, "Scheduled", formatTime(detail.summary.dueAt)); addDefinition(dl, "実行ステップ数", detail.summary.attemptCount);
@@ -435,10 +457,21 @@ byId("post-form").addEventListener("submit", async event => {
     const publishAt = scheduled ? new Date(value).toISOString() : null;
     const account = accounts.find(item => item.accountId === byId("post-account").value);
     const capability = providers.find(item => item.providerKey === account?.provider);
-    const video = capability?.contentKinds.includes("Video") === true && capability?.contentKinds.includes("TextOnly") !== true;
+    const youtubeVideo = account?.provider === "youtube" && capability?.contentKinds.includes("Video") === true;
+    const instagramReel = account?.provider === "instagram" && capability?.contentKinds.includes("Video") === true;
     const images = [...byId("post-images").files];
     let result;
-    if (video) {
+    if (instagramReel) {
+      const file = byId("post-video").files[0];
+      if (!file || file.size <= 0 || file.size > 1024 * 1024 * 1024) throw new Error("1 GiB以下のMP4動画を選択してください。");
+      const body = new FormData();
+      body.set("accountId", byId("post-account").value); body.set("clientRequestId", pendingRequestId);
+      body.set("caption", byId("post-instagram-caption").value);
+      body.set("shareToFeed", String(byId("post-instagram-share").checked));
+      if (publishAt) body.set("publishAt", publishAt);
+      body.set("video", file);
+      result = await request("/api/posts/instagram-reel", { method: "POST", body });
+    } else if (youtubeVideo) {
       const file = byId("post-video").files[0];
       if (!file) throw new Error("MP4動画を選択してください。");
       if (!byId("post-title").value.trim()) throw new Error("タイトルを入力してください。");
@@ -464,6 +497,7 @@ byId("post-form").addEventListener("submit", async event => {
     pendingRequestId = crypto.randomUUID(); byId("post-text").value = ""; byId("text-count").textContent = "0 / 280";
     byId("post-images").value = ""; byId("post-video").value = "";
     byId("post-title").value = ""; byId("post-description").value = "";
+    byId("post-instagram-caption").value = ""; byId("post-instagram-share").checked = true;
     byId("post-made-for-kids").value = ""; byId("post-synthetic").checked = false;
     byId("post-upload-notice").checked = false;
     showNotice(`Queueへ登録しました: ${result.postId}`); showView("publications"); await refreshAll();

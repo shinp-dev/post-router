@@ -50,7 +50,7 @@ public sealed record PublicationDetail(
     PublicationListItem Summary, string? Text, string Visibility, string OptionsSchema,
     DateTimeOffset? FirstSubmittedAt, DateTimeOffset? ConfirmedAt,
     string? ProviderError, FailureCategory? NormalizedError, bool ReconcileQueued,
-    bool CanCancel, bool CanRetry, bool CanReconcile);
+    bool CanCancel, bool CanRetry, bool CanReconcile, string? ContainerId = null);
 public sealed record CreateTextPostRequest(
     Guid AccountId, string Text, DateTimeOffset? PublishAt = null,
     string? ClientRequestId = null);
@@ -61,6 +61,9 @@ public sealed record CreateVideoPostRequest(
     Guid AccountId, string Title, string? Description, MediaAsset Video,
     bool? MadeForKids, bool ContainsSyntheticMedia, string Visibility,
     bool UploadNoticeAcknowledged, string? ClientRequestId = null);
+public sealed record CreateInstagramReelRequest(
+    Guid AccountId, MediaAsset Video, string? Caption, bool ShareToFeed,
+    DateTimeOffset? PublishAt = null, string? ClientRequestId = null);
 public class ProviderOperationException(string safeCode, bool retryable, Exception? inner = null) : Exception(safeCode, inner)
 {
     public string SafeCode { get; } = safeCode;

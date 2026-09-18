@@ -346,6 +346,37 @@ public static class GuiApplication
             }
             finally { try { File.Delete(path); } catch (IOException) { } }
         });
+        app.MapPost("/api/posts/instagram-reel", async (HttpRequest request, CancellationToken token) =>
+        {
+            if (request.ContentLength > MaximumVideoRequestBodyBytes) throw new BadHttpRequestException("Video request is too large.");
+            var form = await request.ReadFormAsync(token).ConfigureAwait(false);
+            if (!Guid.TryParse(form["accountId"], out var accountId)) throw new ArgumentException("Account ID is invalid.");
+            if (form.Files.Count != 1 || form.Files[0].Name != "video") throw new ArgumentException("One MP4 video is required.");
+            if (!bool.TryParse(form["shareToFeed"], out var shareToFeed)) throw new ArgumentException("Share to feed selection is invalid.");
+            DateTimeOffset? publishAt = null;
+            if (!string.IsNullOrWhiteSpace(form["publishAt"]))
+            {
+                if (!DateTimeOffset.TryParse(form["publishAt"], out var parsed))
+                    throw new ArgumentException("Scheduled time is invalid.");
+                publishAt = parsed;
+            }
+            var file = form.Files[0];
+            if (file.Length is <= 0 or > 1024L * 1024 * 1024) throw new ArgumentException("Instagram MP4 must be 1 GiB or smaller.");
+            var incoming = Path.Combine(runtime.DataDirectory, "incoming");
+            Directory.CreateDirectory(incoming);
+            var path = Path.Combine(incoming, $"{Guid.NewGuid():N}.upload");
+            try
+            {
+                await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    1024 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                    await file.CopyToAsync(output, token).ConfigureAwait(false);
+                var asset = await runtime.Spool.ImportAsync(path, token).ConfigureAwait(false);
+                return Results.Json(await runtime.Operations.EnqueueInstagramReelAsync(new(
+                    accountId, asset, form["caption"].ToString(), shareToFeed, publishAt,
+                    form["clientRequestId"].ToString()), token).ConfigureAwait(false));
+            }
+            finally { try { File.Delete(path); } catch (IOException) { } }
+        });
         app.MapPost("/api/posts/{postId:guid}/cancel", async (Guid postId, CancellationToken token) =>
         {
             var changed = await runtime.Operations.CancelAsync(postId, token).ConfigureAwait(false);

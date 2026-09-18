@@ -32,6 +32,8 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         _youtubeHttpClient = youtubeHttpClient;
         _instagramHttpClient = instagramHttpClient;
         InstagramOAuth = new(new FileInstagramOAuthConfigurationStore(dataDirectory), store);
+        Spool = new SpoolStore(Path.Combine(dataDirectory, "spool"));
+        MediaOperations = new PublicMediaOperations(new TemporaryPublicMediaPayloadStore(dataDirectory), mediaJournal);
         var database = new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db"));
         Approvals = new PublicationApprovalStore(database);
         var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System);
@@ -50,18 +52,18 @@ public sealed class PostRouterRuntime : IAsyncDisposable
             TimeProvider.System,
             Auth,
             youtubeClient);
+        var instagramAdapter = new InstagramReelProviderAdapter(Auth, applicationStore, Spool, MediaOperations,
+            async token => await CreateGitHubMediaHostAsync(token).ConfigureAwait(false),
+            new InstagramPublishingClient(instagramHttpClient), TimeProvider.System);
         var adapters = fakeEnabled
-            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter, new InstagramConnectionOnlyAdapter() }
-            : [xAdapter, youtubeAdapter, new InstagramConnectionOnlyAdapter()];
+            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter, instagramAdapter }
+            : [xAdapter, youtubeAdapter, instagramAdapter];
         var providers = new ProviderRegistry(adapters);
         Posts = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
         Operations = new(applicationStore, maintenanceGate, providers, Posts, TimeProvider.System, Approvals);
         Worker = new(applicationStore, providers, new FileWorkerLockFactory(Path.Combine(dataDirectory, "worker.lock")), maintenanceGate, TimeProvider.System, accountOperationLocks: accountLocks);
         Stats = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
-        var spoolDirectory = Path.Combine(dataDirectory, "spool");
-        Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, spoolDirectory), applicationStore, TimeProvider.System);
-        Spool = new SpoolStore(spoolDirectory);
-        MediaOperations = new PublicMediaOperations(new TemporaryPublicMediaPayloadStore(dataDirectory), mediaJournal);
+        Maintenance = new(new DatabaseMaintenance(database, maintenanceGate, Path.Combine(dataDirectory, "spool")), applicationStore, TimeProvider.System);
     }
 
     public string DataDirectory { get; }
