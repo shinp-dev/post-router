@@ -14,6 +14,34 @@ namespace PostRouter.Tests;
 public sealed class GuiSmokeTests
 {
     [Fact]
+    public async Task Instagram_settings_api_keeps_app_secret_in_vault_and_out_of_responses()
+    {
+        const string secret = "instagram-gui-secret-marker";
+        await using var setup = await GuiTestSetup.CreateAsync();
+        await setup.StartGuiAsync();
+        using var initial = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/instagram/settings"));
+        Assert.False(initial.RootElement.GetProperty("appSecretConfigured").GetBoolean());
+        using var configured = await setup.PostAsync("/api/instagram/app-id", new { appId = "123456" });
+        Assert.Equal(HttpStatusCode.OK, configured.StatusCode);
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(secret + "\n")), "clientSecretFile", "instagram-secret.txt");
+        using var saved = await setup.PostFormAsync("/api/instagram/app-secret", form);
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        var savedBody = await saved.Content.ReadAsStringAsync();
+        Assert.Contains("\"appSecretConfigured\":true", savedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, savedBody, StringComparison.Ordinal);
+        var settingsBody = await setup.Client.GetStringAsync("/api/instagram/settings");
+        Assert.DoesNotContain(secret, settingsBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, await File.ReadAllTextAsync(Path.Combine(setup.Directory, "instagram-oauth-settings.json")), StringComparison.Ordinal);
+        using var providers = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/providers"));
+        var instagram = providers.RootElement.EnumerateArray().Single(provider => provider.GetProperty("providerKey").GetString() == "instagram");
+        Assert.Empty(instagram.GetProperty("contentKinds").EnumerateArray());
+        using var cleared = await setup.PostAsync("/api/instagram/app-secret/clear", new { });
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+        Assert.DoesNotContain(secret, await cleared.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Media_gui_stages_recovers_and_deletes_through_http_without_duplicate_upload()
     {
         using var github = new FakeGitHubMediaServer();

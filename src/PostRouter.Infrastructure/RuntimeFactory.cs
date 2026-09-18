@@ -8,6 +8,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     private readonly AesGcmSecretProtector _protector;
     private readonly HttpClient _xHttpClient;
     private readonly HttpClient _youtubeHttpClient;
+    private readonly HttpClient _instagramHttpClient;
 
     internal PostRouterRuntime(
         string dataDirectory,
@@ -17,7 +18,8 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         FileMaintenanceGate maintenanceGate,
         AesGcmSecretProtector protector,
         HttpClient xHttpClient,
-        HttpClient youtubeHttpClient)
+        HttpClient youtubeHttpClient,
+        HttpClient instagramHttpClient)
     {
         DataDirectory = dataDirectory;
         Store = store;
@@ -28,6 +30,8 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         _protector = protector;
         _xHttpClient = xHttpClient;
         _youtubeHttpClient = youtubeHttpClient;
+        _instagramHttpClient = instagramHttpClient;
+        InstagramOAuth = new(new FileInstagramOAuthConfigurationStore(dataDirectory), store);
         var database = new SqliteDatabase(Path.Combine(dataDirectory, "post-router.db"));
         Approvals = new PublicationApprovalStore(database);
         var applicationStore = new ApprovalAwarePostRouterStore(store, Approvals, TimeProvider.System);
@@ -37,8 +41,9 @@ public sealed class PostRouterRuntime : IAsyncDisposable
         var xAuth = new XAuthProvider(xClient, TimeProvider.System);
         var youtubeClient = new YouTubeApiClient(youtubeHttpClient, TimeProvider.System);
         var youtubeAuth = new YouTubeConsentAuthProvider(new YouTubeAuthProvider(youtubeClient, TimeProvider.System));
-        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth, youtubeAuth], TimeProvider.System);
-        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth, youtubeAuth], Auth);
+        var instagramAuth = new InstagramAuthProvider(new InstagramApiClient(instagramHttpClient), TimeProvider.System);
+        Auth = new(applicationStore, store, grantLocks, maintenanceGate, [fakeProvider, xAuth, youtubeAuth, instagramAuth], TimeProvider.System);
+        Accounts = new(applicationStore, store, maintenanceGate, accountLocks, [xAuth, youtubeAuth, instagramAuth], Auth);
         var xAdapter = new XProviderAdapter(Auth, xClient, TimeProvider.System);
         var youtubeAdapter = new YouTubeResumeSafeAdapter(
             new YouTubeProviderAdapter(Auth, youtubeClient, TimeProvider.System),
@@ -46,8 +51,8 @@ public sealed class PostRouterRuntime : IAsyncDisposable
             Auth,
             youtubeClient);
         var adapters = fakeEnabled
-            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter }
-            : [xAdapter, youtubeAdapter];
+            ? new IProviderAdapter[] { fakeProvider, xAdapter, youtubeAdapter, new InstagramConnectionOnlyAdapter() }
+            : [xAdapter, youtubeAdapter, new InstagramConnectionOnlyAdapter()];
         var providers = new ProviderRegistry(adapters);
         Posts = new(applicationStore, maintenanceGate, providers, TimeProvider.System);
         Operations = new(applicationStore, maintenanceGate, providers, Posts, TimeProvider.System, Approvals);
@@ -62,6 +67,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     public string DataDirectory { get; }
     public SqliteStore Store { get; }
     public GitHubMediaConfigurationService GitHubMedia { get; }
+    public InstagramOAuthConfigurationService InstagramOAuth { get; }
 
     public async Task<GitHubReleaseMediaHost> CreateGitHubMediaHostAsync(CancellationToken cancellationToken = default)
     {
@@ -108,6 +114,7 @@ public sealed class PostRouterRuntime : IAsyncDisposable
     {
         await Worker.DisposeAsync();
         _youtubeHttpClient.Dispose();
+        _instagramHttpClient.Dispose();
         _xHttpClient.Dispose();
         _protector.Dispose();
     }
@@ -146,9 +153,13 @@ public static class RuntimeFactory
                 BaseAddress = new Uri("https://www.googleapis.com/"),
                 Timeout = TimeSpan.FromHours(12),
             };
+            var instagramHttpClient = new HttpClient(InstagramApiClient.CreateProductionHandler())
+            {
+                Timeout = TimeSpan.FromSeconds(30),
+            };
             return new PostRouterRuntime(
                 directory, store, new FakeProvider(), fakeEnabled, maintenanceGate, protector,
-                xHttpClient, youtubeHttpClient);
+                xHttpClient, youtubeHttpClient, instagramHttpClient);
         }
         finally { CryptographicOperations.ZeroMemory(key); }
     }

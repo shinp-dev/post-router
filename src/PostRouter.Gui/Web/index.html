@@ -55,6 +55,20 @@
 
     <section id="accounts" class="view">
       <div class="heading"><div><p class="eyebrow">Accounts</p><h1>アカウント</h1></div><button class="secondary refresh">更新</button></div>
+      <div class="panel">
+        <h2>Instagram API with Instagram Login</h2>
+        <p id="instagram-settings-state">未設定</p>
+        <p class="hint">Callback: https://auth.shinp-studio.com/instagram/callback<br>Cloudflare Tunnel は別途起動し、127.0.0.1:8765 へ転送してください。接続解除はローカルの認証情報のみ削除します。</p>
+        <form id="instagram-app-id-form" class="form-grid compact">
+          <label>Instagram App ID<input id="instagram-app-id" inputmode="numeric" autocomplete="off" required></label>
+          <div class="actions"><button type="submit">App IDを保存</button></div>
+        </form>
+        <form id="instagram-secret-form" class="form-grid compact">
+          <label>App Secret file<input id="instagram-secret-file" type="file" accept=".txt,text/plain" required></label>
+          <div class="actions"><button type="submit">App Secretをvaultに登録</button><button id="instagram-secret-clear" type="button" class="secondary">App Secretを削除</button></div>
+        </form>
+        <div class="actions"><button id="instagram-connect" type="button">Instagramに接続</button><button id="instagram-flow-cancel" type="button" class="secondary" hidden>接続を中止</button></div>
+      </div>
       <form id="connect-form" class="panel form-grid compact">
         <h2 class="wide">Providerへ接続</h2>
         <label>Provider<select id="connect-provider"></select></label>

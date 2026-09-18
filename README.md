@@ -39,6 +39,8 @@ pub post status <post-id>
 
 YouTube Desktop OAuthでは、Googleが発行したclient secretを必要とする場合だけ指定できる。GUIではYouTube接続時に「Client secret file」を選び、CLIではリポジトリ外のファイルを`--client-secret-file`で読む。ファイルは1行のUTF-8 secretまたはGoogle Desktop OAuthのinstalled JSONに対応する。secret自体をコマンド引数に書かない。接続成功後はtokenとともに暗号化vaultへ保存され、再接続とrefreshで再利用される。`disconnect`後はvaultのsecretも削除されるので、再接続時に同じファイルを再指定する。入力ファイルは接続成功後に削除できる。PKCE S256は引き続き使用する。[Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)
 
+Instagram API with Instagram Loginの接続はGUIの「アカウント」画面、または`pub account instagram`から設定する。App Secretはファイル・標準入力・非表示プロンプトから暗号化vaultに登録する。外部HTTPS callbackは既存Cloudflare Tunnelから`127.0.0.1:8765`へ転送する。今回Instagram投稿機能はない。設定とlive acceptanceは[Instagram OAuth](docs/instagram-oauth.md)を参照。
+
 GUIから非公開YouTube動画を投稿するには、`pub gui`で接続済みYouTubeアカウントを選び、MP4、タイトル、Made for Kidsの明示選択、upload noticeの確認を入力してQueueへ登録する。説明と合成・改変メディアの指定もできる。公開設定は現在GUIでprivateに固定される。別processの`pub worker once`または`pub worker run`がuploadとprocessing確認を進める。upload完了時からvideo IDが`pub post status <post-id>`とGUI詳細に表示され、remoteのprivate状態を再確認した後にPost Router側も`Published`になる。
 
 明示的にstageしたローカル素材を、一時的なpublic HTTPS URLとして渡す汎用部品を用意している。**staged mediaは削除するまでpublicになる。** GitHub stagingのローカル素材コピーはStaged/Pending到達後に削除し、recoverはmetadataだけで照会する。remote asset削除確定後はoperation metadataも削除し、Deleted履歴は残さない。GitHub Release Assetを使う実装と、期限・復旧・削除の境界は[Temporary public media host](docs/temporary-public-media-host.md)を参照。GUIの「設定」画面とCLIの`pub media`で公開先・PATの登録、stage、read-onlyのrecover、remote assetのdeleteができる。GUIの接続確認結果は設定画面のボタン横に表示される。投稿Adapterには接続していない。
@@ -106,5 +108,6 @@ Xのtext-onlyとJPEG画像（1〜4枚）以外は今後の目標UXであり、�
 | [Phase 2A X](docs/phase2a-x.md) | X text投稿、OAuth、解除、二重投稿境界、検証状態 |
 | [Phase 2B GUI](docs/phase2b-gui.md) | localhost操作盤、Application境界、CSRF、画面・検証範囲 |
 | [Temporary public media host](docs/temporary-public-media-host.md) | 明示的な一時公開、GitHub Release Asset、opaque handle、復旧と削除 |
+| [Instagram OAuth](docs/instagram-oauth.md) | Instagram Login接続、token保護、Tunnel callback、実機受入手順 |
 
-公式APIの調査と設計判断は区別する。Instagramは公式本文の一部取得に制限があり、細部の未確認事項をAPI調査書のG-IGに明記した。設計完了は審査通過・本番動作確認を意味しない。
+公式APIの調査と設計判断は区別する。Instagram LoginのOAuth部分は2026-09-18にMeta公式資料を再確認した（[確認範囲](docs/instagram-oauth.md)）。投稿APIなど今回未実装の事項は別途確認が必要。設計完了は審査通過・本番動作確認を意味しない。

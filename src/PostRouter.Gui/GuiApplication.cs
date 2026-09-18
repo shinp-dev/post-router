@@ -19,7 +19,7 @@ namespace PostRouter.Gui;
 
 public sealed record GuiOptions(string? DataDirectory = null, int Port = 43127, bool OpenBrowser = true);
 
-public sealed class GuiHost(WebApplication application, PostRouterRuntime runtime, Uri address) : IAsyncDisposable
+public sealed class GuiHost(WebApplication application, PostRouterRuntime runtime, InstagramGuiFlowManager instagramFlows, Uri address) : IAsyncDisposable
 {
     public Uri Address { get; } = address;
     public Task WaitForShutdownAsync(CancellationToken cancellationToken = default) => application.WaitForShutdownAsync(cancellationToken);
@@ -27,6 +27,7 @@ public sealed class GuiHost(WebApplication application, PostRouterRuntime runtim
     public async ValueTask DisposeAsync()
     {
         await application.StopAsync().ConfigureAwait(false);
+        await instagramFlows.DisposeAsync().ConfigureAwait(false);
         await application.DisposeAsync().ConfigureAwait(false);
         await runtime.DisposeAsync().ConfigureAwait(false);
     }
@@ -47,6 +48,11 @@ public static class GuiApplication
         "oauth_state_mismatch",
         "oauth_scope_missing",
         "oauth_refresh_token_missing",
+        "oauth_code_missing",
+        "oauth_callback_invalid",
+        "oauth_authorization_failed",
+        "instagram_app_secret_missing",
+        "instagram_app_id_mismatch",
         "reconnect_account_mismatch",
         "auth_required",
     };
@@ -86,7 +92,8 @@ public static class GuiApplication
                 server.Listen(IPAddress.Loopback, options.Port);
             });
             var app = builder.Build();
-            Configure(app, runtime, createMediaHost ?? runtime.CreateGitHubMediaHostAsync);
+            var instagramFlows = new InstagramGuiFlowManager(runtime);
+            Configure(app, runtime, instagramFlows, createMediaHost ?? runtime.CreateGitHubMediaHostAsync);
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
             var address = ResolveAddress(app);
             if (options.OpenBrowser)
@@ -94,7 +101,7 @@ public static class GuiApplication
                 try { Process.Start(new ProcessStartInfo(address.AbsoluteUri) { UseShellExecute = true }); }
                 catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             }
-            return new GuiHost(app, runtime, address);
+            return new GuiHost(app, runtime, instagramFlows, address);
         }
         catch
         {
@@ -103,7 +110,7 @@ public static class GuiApplication
         }
     }
 
-    private static void Configure(WebApplication app, PostRouterRuntime runtime,
+    private static void Configure(WebApplication app, PostRouterRuntime runtime, InstagramGuiFlowManager instagramFlows,
         Func<CancellationToken, Task<GitHubReleaseMediaHost>> createMediaHost)
     {
         var csrfToken = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
@@ -134,6 +141,7 @@ public static class GuiApplication
                 if (bodyLimit is { IsReadOnly: false }) bodyLimit.MaxRequestBodySize = MaximumStagingRequestBodyBytes;
             }
             var isSecretFileRequest = context.Request.Path.Equals(new PathString("/api/accounts/connect/file")) ||
+                context.Request.Path.Equals(new PathString("/api/instagram/app-secret")) ||
                 context.Request.Path.Value?.EndsWith("/reconnect/file", StringComparison.Ordinal) == true;
             if (HttpMethods.IsPost(context.Request.Method) && !isMediaRequest && !isSecretFileRequest &&
                 context.Request.ContentLength > MaximumJsonRequestBodyBytes)
@@ -159,6 +167,28 @@ public static class GuiApplication
         app.MapGet("/api/dashboard", async (CancellationToken token) => Results.Json(await runtime.Operations.DashboardAsync(token).ConfigureAwait(false)));
         app.MapGet("/api/providers", () => Results.Json(runtime.Operations.Capabilities()));
         app.MapGet("/api/accounts", async (CancellationToken token) => Results.Json(await runtime.Operations.AccountsAsync(token).ConfigureAwait(false)));
+        app.MapGet("/api/instagram/settings", async (CancellationToken token) =>
+            Results.Json(await runtime.InstagramOAuth.StatusAsync(token).ConfigureAwait(false)));
+        app.MapPost("/api/instagram/app-id", async (InstagramAppIdRequest request, CancellationToken token) =>
+            Results.Json(await runtime.InstagramOAuth.SetAppIdAsync(request.AppId, token).ConfigureAwait(false)));
+        app.MapPost("/api/instagram/app-secret", async (HttpContext context, CancellationToken token) =>
+        {
+            var form = await context.Request.ReadFormAsync(token).ConfigureAwait(false);
+            var secret = await ReadClientSecretFileAsync(form.Files, token).ConfigureAwait(false);
+            var bytes = Encoding.UTF8.GetBytes(secret);
+            try { return Results.Json(await runtime.InstagramOAuth.SetAppSecretAsync(bytes, token).ConfigureAwait(false)); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        });
+        app.MapPost("/api/instagram/app-secret/clear", async (CancellationToken token) =>
+            Results.Json(await runtime.InstagramOAuth.ClearAppSecretAsync(token).ConfigureAwait(false)));
+        app.MapPost("/api/instagram/connect", async (InstagramConnectRequest request, CancellationToken token) =>
+            Results.Json(await instagramFlows.StartAsync(null, request.Alias, token).ConfigureAwait(false)));
+        app.MapPost("/api/instagram/accounts/{accountId:guid}/reconnect", async (Guid accountId, CancellationToken token) =>
+            Results.Json(await instagramFlows.StartAsync(accountId, null, token).ConfigureAwait(false)));
+        app.MapGet("/api/instagram/flows/{flowId:guid}", (Guid flowId) =>
+            instagramFlows.Status(flowId) is { } status ? Results.Json(status) : Results.NotFound());
+        app.MapPost("/api/instagram/flows/{flowId:guid}/cancel", (Guid flowId) =>
+            instagramFlows.Cancel(flowId) ? Results.Json(new { cancelled = true }) : Results.NotFound());
         app.MapGet("/api/media/settings", async (CancellationToken token) =>
             Results.Json(await runtime.GitHubMedia.StatusAsync(token).ConfigureAwait(false)
                 ?? new GitHubMediaConfigurationStatus("", "", "", false)));
@@ -516,6 +546,8 @@ public static class GuiApplication
         public override string ToString() => "[REDACTED RECONNECT REQUEST]";
     }
     private sealed record MediaSettingsRequest(string Owner, string Repository, string ReleaseTag);
+    private sealed record InstagramAppIdRequest(string AppId);
+    private sealed record InstagramConnectRequest(string? Alias);
     private sealed record MediaDeleteRequest(bool Confirmed);
     private sealed record MediaCredentialRequest(string Token)
     {
