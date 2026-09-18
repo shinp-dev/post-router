@@ -58,6 +58,8 @@
       <div class="panel">
         <h2>Instagram API with Instagram Login</h2>
         <p id="instagram-settings-state">未設定</p>
+        <p id="instagram-flow-error-code" hidden></p>
+        <p id="instagram-flow-error-hint" class="hint" hidden>Instagramとの接続に失敗しました。エラーコードを確認してください。</p>
         <p class="hint">Callback: https://auth.shinp-studio.com/instagram/callback<br>Cloudflare Tunnel は別途起動し、127.0.0.1:8765 へ転送してください。接続解除はローカルの認証情報のみ削除します。</p>
         <form id="instagram-app-id-form" class="form-grid compact">
           <label>Instagram App ID<input id="instagram-app-id" inputmode="numeric" autocomplete="off" required></label>

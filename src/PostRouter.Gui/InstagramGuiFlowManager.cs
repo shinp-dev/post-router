@@ -7,10 +7,14 @@ namespace PostRouter.Gui;
 public sealed record InstagramFlowStart(Guid FlowId, string AuthorizationUrl, int ExpiresInSeconds);
 public sealed record InstagramFlowStatus(string State, string? ErrorCode, Guid? AccountId);
 
-public sealed class InstagramGuiFlowManager(PostRouterRuntime runtime) : IAsyncDisposable
+public sealed class InstagramGuiFlowManager(PostRouterRuntime runtime,
+    Func<InstagramCallbackListener>? createListener = null, Action<string>? writeSafeFailure = null) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, InstagramFlowStatus> _statuses = new();
+    private readonly Func<InstagramCallbackListener> _createListener = createListener ?? (() => new InstagramCallbackListener());
+    private readonly Action<string> _writeSafeFailure = writeSafeFailure ?? Console.Error.WriteLine;
     private readonly CancellationTokenSource _shutdown = new();
+    private InstagramFlowStatus? _latestStatus;
     private Task? _pending;
     private CancellationTokenSource? _flowCancellation;
     private Guid _activeFlowId;
@@ -30,12 +34,12 @@ public sealed class InstagramGuiFlowManager(PostRouterRuntime runtime) : IAsyncD
                 : runtime.Accounts.BeginConnect("instagram", appId, redirect, alias);
             if (session.Provider != "instagram" || session.ClientId != appId)
                 throw new InvalidOperationException("instagram_app_id_mismatch");
-            var listener = new InstagramCallbackListener();
+            var listener = _createListener();
             var flowId = Guid.NewGuid();
             var flowCancellation = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             _flowCancellation = flowCancellation;
             _activeFlowId = flowId;
-            _statuses[flowId] = new("Pending", null, null);
+            _latestStatus = _statuses[flowId] = new("Pending", null, null);
             _pending = RunAsync(flowId, listener, session, secret, flowCancellation);
             return new(flowId, session.AuthorizationUri.AbsoluteUri, 300);
         }
@@ -47,6 +51,8 @@ public sealed class InstagramGuiFlowManager(PostRouterRuntime runtime) : IAsyncD
     }
 
     public InstagramFlowStatus? Status(Guid flowId) => _statuses.GetValueOrDefault(flowId);
+
+    public InstagramFlowStatus? LatestStatus() => Volatile.Read(ref _latestStatus);
 
     public bool Cancel(Guid flowId)
     {
@@ -65,12 +71,16 @@ public sealed class InstagramGuiFlowManager(PostRouterRuntime runtime) : IAsyncD
                 var account = await listener.ReceiveAsync(session,
                     (code, state, token) => runtime.Accounts.CompleteConnectAsync(session, code, state, secret, token),
                     flowCancellation.Token).ConfigureAwait(false);
-                _statuses[flowId] = new("Connected", null, account.AccountId);
+                Volatile.Write(ref _latestStatus, _statuses[flowId] = new("Connected", null, account.AccountId));
             }
         }
         catch (Exception ex)
         {
-            _statuses[flowId] = new("Failed", GuiApplication.OAuthErrorCode(ex), null);
+            var code = ex is OperationCanceledException
+                ? flowCancellation.IsCancellationRequested ? "instagram_flow_cancelled" : "instagram_callback_timeout"
+                : GuiApplication.OAuthErrorCode(ex);
+            Volatile.Write(ref _latestStatus, _statuses[flowId] = new("Failed", code, null));
+            _writeSafeFailure($"Instagram OAuth failed: {code}");
         }
         finally
         {

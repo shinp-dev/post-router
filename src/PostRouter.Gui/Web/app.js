@@ -490,14 +490,26 @@ byId("connect-form").addEventListener("submit", async event => {
 });
 
 async function refreshInstagramSettings() {
-  instagramSettings = await request("/api/instagram/settings");
+  const [settings, latestFlow] = await Promise.all([
+    request("/api/instagram/settings"), request("/api/instagram/flows/latest"),
+  ]);
+  instagramSettings = settings;
   if (document.activeElement !== byId("instagram-app-id")) byId("instagram-app-id").value = instagramSettings.appId || "";
   const connected = accounts.find(account => account.provider === "instagram" && account.status === "Connected");
-  byId("instagram-settings-state").textContent = instagramFlowId ? "接続中" :
-    instagramLastError ? `接続失敗: ${instagramLastError}` :
+  const errorCode = instagramLastError || (latestFlow.state === "Failed" ? safeInstagramErrorCode(latestFlow.errorCode) : null);
+  byId("instagram-settings-state").textContent = instagramFlowId || latestFlow.state === "Pending" ? "接続中" :
+    errorCode ? "接続失敗" :
     connected ? `接続済み: ${connected.displayName} (${connected.remoteSubject})` :
     instagramSettings.appId && instagramSettings.appSecretConfigured ? "未接続" : "未設定";
-  byId("instagram-connect").disabled = !instagramSettings.appId || !instagramSettings.appSecretConfigured || !!instagramFlowId;
+  byId("instagram-flow-error-code").textContent = errorCode ? `エラーコード: ${errorCode}` : "";
+  byId("instagram-flow-error-code").hidden = !errorCode;
+  byId("instagram-flow-error-hint").hidden = !errorCode;
+  byId("instagram-connect").disabled = !instagramSettings.appId || !instagramSettings.appSecretConfigured ||
+    !!instagramFlowId || latestFlow.state === "Pending";
+}
+
+function safeInstagramErrorCode(code) {
+  return typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "connection_failed";
 }
 
 async function startInstagramFlow(path) {
@@ -523,10 +535,11 @@ async function startInstagramFlow(path) {
         window.clearInterval(instagramFlowTimer);
         instagramFlowId = null;
         byId("instagram-flow-cancel").hidden = true;
-        instagramLastError = result.state === "Connected" ? null : result.errorCode || "connection_failed";
+        instagramLastError = result.state === "Connected" ? null : safeInstagramErrorCode(result.errorCode);
         await refreshAll();
         await refreshInstagramSettings();
-        showNotice(result.state === "Connected" ? "Instagramに接続しました。" : `Instagram接続失敗: ${result.errorCode || "connection_failed"}`, result.state !== "Connected");
+        showNotice(result.state === "Connected" ? "Instagramに接続しました。" :
+          `Instagram接続失敗: ${instagramLastError}`, result.state !== "Connected");
       } catch (error) { showNotice(error.message, true); }
     }, 1500);
   } catch (error) { if (popup) popup.close(); showNotice(error.message, true); }

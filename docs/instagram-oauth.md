@@ -38,3 +38,11 @@ post-router account instagram secret clear
 ```
 
 `secret set --secret-stdin` and a hidden prompt are also supported. Never place the secret itself on a command line. Live OAuth remains a user acceptance step; automated tests use fake HTTP responses and do not contact Meta.
+
+## Safe failure diagnosis
+
+The Accounts page keeps the latest Instagram OAuth result while the GUI process is running. On failure it shows `接続失敗`, an `エラーコード`, and a short instruction. The callback page remains generic. The PowerShell window running the GUI prints one line such as `Instagram OAuth failed: instagram_code_exchange_bad_request`. These contain only fixed safe codes; neither the Meta response nor a request URL is printed. The local `GET /api/instagram/flows/{flowId}` and `GET /api/instagram/flows/latest` endpoints return the same safe code.
+
+The first live callback reached the loopback listener but ended with the old `instagram_token_invalid` code. That code combined several possible **successful HTTP response validation** failures: a missing short token, missing permissions, a missing long token, or an invalid long token expiry. It does not identify which Meta field was missing. The new codes distinguish these cases without retaining the raw response. Short token permissions may be a comma-separated string or an array of strings; expiry may be a JSON number or a numeric string. Both requested permissions remain mandatory. HTTP 400/401, transport failures, and malformed JSON have separate codes for the code exchange, long token exchange, identity request, and refresh request.
+
+To repeat acceptance: start the existing cloudflared tunnel, start the GUI with the intended data directory, select **Instagramに接続**, and approve access in Instagram. Confirm the connected username is `shinpstudio`. If it fails, report **only** the displayed safe error code. Do not copy the browser address bar, callback query, App Secret, authorization code, token, or Meta response.

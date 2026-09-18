@@ -58,15 +58,19 @@ public static class GuiApplication
     };
 
     public static Task<GuiHost> StartAsync(GuiOptions options, CancellationToken cancellationToken = default) =>
-        StartCoreAsync(options, null, cancellationToken);
+        StartCoreAsync(options, null, null, null, cancellationToken);
 
     internal static Task<GuiHost> StartForTestsAsync(GuiOptions options,
-        Func<CancellationToken, Task<GitHubReleaseMediaHost>> createMediaHost,
+        Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost,
+        Func<InstagramCallbackListener>? createInstagramListener = null,
+        Action<string>? writeSafeInstagramFailure = null,
         CancellationToken cancellationToken = default) =>
-        StartCoreAsync(options, createMediaHost, cancellationToken);
+        StartCoreAsync(options, createMediaHost, createInstagramListener, writeSafeInstagramFailure, cancellationToken);
 
     private static async Task<GuiHost> StartCoreAsync(GuiOptions options,
         Func<CancellationToken, Task<GitHubReleaseMediaHost>>? createMediaHost,
+        Func<InstagramCallbackListener>? createInstagramListener,
+        Action<string>? writeSafeInstagramFailure,
         CancellationToken cancellationToken)
     {
         if (options.Port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(options), "GUI port must be between 0 and 65535.");
@@ -92,7 +96,7 @@ public static class GuiApplication
                 server.Listen(IPAddress.Loopback, options.Port);
             });
             var app = builder.Build();
-            var instagramFlows = new InstagramGuiFlowManager(runtime);
+            var instagramFlows = new InstagramGuiFlowManager(runtime, createInstagramListener, writeSafeInstagramFailure);
             Configure(app, runtime, instagramFlows, createMediaHost ?? runtime.CreateGitHubMediaHostAsync);
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
             var address = ResolveAddress(app);
@@ -187,6 +191,8 @@ public static class GuiApplication
             Results.Json(await instagramFlows.StartAsync(accountId, null, token).ConfigureAwait(false)));
         app.MapGet("/api/instagram/flows/{flowId:guid}", (Guid flowId) =>
             instagramFlows.Status(flowId) is { } status ? Results.Json(status) : Results.NotFound());
+        app.MapGet("/api/instagram/flows/latest", () =>
+            Results.Json(instagramFlows.LatestStatus() ?? new InstagramFlowStatus("Idle", null, null)));
         app.MapPost("/api/instagram/flows/{flowId:guid}/cancel", (Guid flowId) =>
             instagramFlows.Cancel(flowId) ? Results.Json(new { cancelled = true }) : Results.NotFound());
         app.MapGet("/api/media/settings", async (CancellationToken token) =>

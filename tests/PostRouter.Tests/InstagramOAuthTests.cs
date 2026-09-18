@@ -116,11 +116,105 @@ public sealed class InstagramOAuthTests
         var failedSession = failedProvider.BeginAuthorization("123456", Redirect);
         var failure = await Assert.ThrowsAsync<InstagramProviderException>(() =>
             failedProvider.CompleteAuthorizationAsync(failedSession, "code-secret", failedSession.State, "app-secret", CancellationToken.None));
-        Assert.Equal("instagram_token_rejected", failure.SafeCode);
+        Assert.Equal("instagram_code_exchange_bad_request", failure.SafeCode);
         Assert.DoesNotContain("app-secret", failure.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("raw-description", failure.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("short-secret", new InstagramShortLivedToken("short-secret", "permissions").ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("long-secret", new InstagramTokenResponse("long-secret", 100).ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("code", 400, "instagram_code_exchange_bad_request")]
+    [InlineData("code", 401, "instagram_code_exchange_unauthorized")]
+    [InlineData("long", 400, "instagram_long_token_exchange_bad_request")]
+    [InlineData("long", 401, "instagram_long_token_exchange_unauthorized")]
+    [InlineData("identity", 400, "instagram_identity_bad_request")]
+    [InlineData("identity", 401, "instagram_identity_unauthorized")]
+    [InlineData("refresh", 400, "instagram_refresh_bad_request")]
+    [InlineData("refresh", 401, "instagram_refresh_unauthorized")]
+    public async Task Meta_failures_are_classified_by_stage_and_status_without_response_text(string stage, int status, string safeCode)
+    {
+        const string secret = "private-app-secret-marker";
+        const string token = "private-access-token-marker";
+        const string response = "{\"error\":{\"message\":\"private-meta-response-marker\",\"code\":190}}";
+        using var http = new HttpClient(new Handler((_, _, _) => Task.FromResult(Json((HttpStatusCode)status, response))));
+        var client = new InstagramApiClient(http);
+        var failure = await Assert.ThrowsAsync<InstagramProviderException>(() => stage switch
+        {
+            "code" => client.ExchangeCodeAsync("123456", secret, "private-code-marker", Redirect, CancellationToken.None),
+            "long" => client.ExchangeLongLivedAsync(secret, token, CancellationToken.None),
+            "identity" => client.GetIdentityAsync(token, CancellationToken.None),
+            "refresh" => client.RefreshAsync(token, CancellationToken.None),
+            _ => throw new InvalidOperationException(),
+        });
+        Assert.Equal(safeCode, failure.SafeCode);
+        var visible = failure.ToString();
+        Assert.DoesNotContain(secret, visible, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-code-marker", visible, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-meta-response-marker", visible, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"data\":[{\"permissions\":\"instagram_business_basic\"}]}", "instagram_code_exchange_token_missing")]
+    [InlineData("{\"data\":[{\"access_token\":\"private-token-marker\"}]}", "instagram_permissions_response_missing")]
+    [InlineData("not-json", "instagram_code_exchange_response_invalid")]
+    public async Task Code_exchange_response_missing_fields_has_precise_safe_code(string body, string safeCode)
+    {
+        using var http = new HttpClient(new Handler((_, _, _) => Task.FromResult(Json(HttpStatusCode.OK, body))));
+        var client = new InstagramApiClient(http);
+        var failure = await Assert.ThrowsAsync<InstagramProviderException>(() =>
+            client.ExchangeCodeAsync("123456", "private-secret", "private-code", Redirect, CancellationToken.None));
+        Assert.Equal(safeCode, failure.SafeCode);
+        Assert.DoesNotContain("private-", failure.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"expires_in\":5184000}", "instagram_long_token_missing")]
+    [InlineData("{\"access_token\":\"private-token-marker\"}", "instagram_long_token_expiry_invalid")]
+    [InlineData("{\"access_token\":\"private-token-marker\",\"expires_in\":0}", "instagram_long_token_expiry_invalid")]
+    [InlineData("not-json", "instagram_long_token_response_invalid")]
+    public async Task Long_token_response_missing_fields_has_precise_safe_code(string body, string safeCode)
+    {
+        using var http = new HttpClient(new Handler((_, _, _) => Task.FromResult(Json(HttpStatusCode.OK, body))));
+        var client = new InstagramApiClient(http);
+        var failure = await Assert.ThrowsAsync<InstagramProviderException>(() =>
+            client.ExchangeLongLivedAsync("private-secret", "private-short-token", CancellationToken.None));
+        Assert.Equal(safeCode, failure.SafeCode);
+        Assert.DoesNotContain("private-", failure.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Alternate_structured_permissions_and_numeric_string_expiry_keep_required_scope_check()
+    {
+        using var http = new HttpClient(new Handler((_, call, _) => Task.FromResult(call == 1
+            ? Json(HttpStatusCode.OK, "{\"data\":{\"access_token\":\"private-short-token\",\"permissions\":[\"instagram_business_basic\",\"instagram_business_content_publish\"]}}")
+            : Json(HttpStatusCode.OK, "{\"access_token\":\"private-long-token\",\"expires_in\":\"5184000\"}"))));
+        var client = new InstagramApiClient(http);
+        var shortToken = await client.ExchangeCodeAsync("123456", "private-secret", "private-code", Redirect, CancellationToken.None);
+        Assert.Equal("instagram_business_basic,instagram_business_content_publish", shortToken.Permissions);
+        var longToken = await client.ExchangeLongLivedAsync("private-secret", shortToken.AccessToken, CancellationToken.None);
+        Assert.Equal(5184000, longToken.ExpiresIn);
+    }
+
+    [Theory]
+    [InlineData("code", "instagram_code_exchange_transport_failure")]
+    [InlineData("long", "instagram_long_token_exchange_transport_failure")]
+    [InlineData("identity", "instagram_identity_transport_failure")]
+    public async Task Transport_failures_identify_stage_without_exposing_request_uri(string stage, string safeCode)
+    {
+        using var http = new HttpClient(new Handler((request, _, _) =>
+            throw new HttpRequestException($"private-uri={request.RequestUri}")));
+        var client = new InstagramApiClient(http);
+        var failure = await Assert.ThrowsAsync<InstagramProviderException>(() => stage switch
+        {
+            "code" => client.ExchangeCodeAsync("123456", "private-secret", "private-code", Redirect, CancellationToken.None),
+            "long" => client.ExchangeLongLivedAsync("private-secret", "private-token", CancellationToken.None),
+            "identity" => client.GetIdentityAsync("private-token", CancellationToken.None),
+            _ => throw new InvalidOperationException(),
+        });
+        Assert.Equal(safeCode, failure.SafeCode);
+        Assert.DoesNotContain("private-", failure.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -275,7 +369,7 @@ public sealed class InstagramOAuthTests
         var client = new InstagramApiClient(http);
         var failure = await Assert.ThrowsAsync<InstagramProviderException>(() =>
             client.ExchangeLongLivedAsync("app-secret-marker", "short-token-marker", CancellationToken.None));
-        Assert.Equal("instagram_transport_failure", failure.SafeCode);
+        Assert.Equal("instagram_long_token_exchange_transport_failure", failure.SafeCode);
         Assert.DoesNotContain("app-secret-marker", failure.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("short-token-marker", failure.ToString(), StringComparison.Ordinal);
     }
