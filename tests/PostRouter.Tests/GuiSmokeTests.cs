@@ -90,10 +90,43 @@ public sealed class GuiSmokeTests
         Assert.DoesNotContain(secret, await File.ReadAllTextAsync(Path.Combine(setup.Directory, "instagram-oauth-settings.json")), StringComparison.Ordinal);
         using var providers = JsonDocument.Parse(await setup.Client.GetStringAsync("/api/providers"));
         var instagram = providers.RootElement.EnumerateArray().Single(provider => provider.GetProperty("providerKey").GetString() == "instagram");
-        Assert.Empty(instagram.GetProperty("contentKinds").EnumerateArray());
+        Assert.Equal("Video", Assert.Single(instagram.GetProperty("contentKinds").EnumerateArray()).GetString());
+        Assert.Equal("instagram-reel-options/v1", instagram.GetProperty("optionsSchema").GetString());
         using var cleared = await setup.PostAsync("/api/instagram/app-secret/clear", new { });
         Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
         Assert.DoesNotContain(secret, await cleared.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Instagram_reel_form_queues_mp4_caption_and_share_option_without_youtube_fields()
+    {
+        await using var setup = await GuiTestSetup.CreateAsync();
+        var blob = await setup.Runtime.Store.PutAsync("auth-token", JsonSerializer.SerializeToUtf8Bytes(
+            new TokenMaterial("instagram-test-token", null, DateTimeOffset.UtcNow.AddDays(30))));
+        var account = await setup.Runtime.Store.SaveConnectedAccountAsync(new(
+            "instagram", "ig-main", "123", "creator", "123456",
+            "instagram_business_basic,instagram_business_content_publish", DateTimeOffset.UtcNow.AddDays(30), blob));
+        await setup.StartGuiAsync();
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent(account.AccountId.ToString("D")), "accountId");
+        form.Add(new StringContent("caption from GUI"), "caption");
+        form.Add(new StringContent("false"), "shareToFeed");
+        form.Add(new StringContent("instagram-gui-reel"), "clientRequestId");
+        var mp4 = new ByteArrayContent([0, 0, 0, 12, (byte)'f', (byte)'t', (byte)'y', (byte)'p', 0, 0, 0, 0]);
+        mp4.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("video/mp4");
+        form.Add(mp4, "video", "clip.mp4");
+        using var response = await setup.PostFormAsync("/api/posts/instagram-reel", form);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var publicationId = Assert.Single(body.RootElement.GetProperty("publicationIds").EnumerateArray()).GetGuid();
+        var detail = await setup.Runtime.Store.GetPublicationDetailAsync(publicationId);
+        Assert.Equal("caption from GUI", detail!.Text);
+        Assert.Equal("instagram-reel-options/v1", detail.OptionsSchema);
+        Assert.Equal("reel", detail.Visibility);
+        Assert.Null(detail.Summary.RemoteId);
+        var html = await setup.Client.GetStringAsync("/");
+        Assert.Contains("id=\"instagram-caption-field\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"instagram-share-field\"", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -509,7 +542,7 @@ public sealed class GuiSmokeTests
         Assert.Contains("id=\"post-made-for-kids\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"post-upload-notice\"", html, StringComparison.Ordinal);
         Assert.Contains("contentKinds.some", script, StringComparison.Ordinal);
-        Assert.Contains("contentKinds.includes(\"TextOnly\")", script, StringComparison.Ordinal);
+        Assert.Contains("account?.provider === \"youtube\"", script, StringComparison.Ordinal);
         Assert.Contains("/api/posts/video", script, StringComparison.Ordinal);
         Assert.Contains("/api/posts/images", script, StringComparison.Ordinal);
 

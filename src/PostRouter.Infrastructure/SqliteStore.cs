@@ -220,12 +220,13 @@ FROM publications p JOIN schedules s ON s.id=p.schedule_id
         var confirmed = NullableAt(reader, 21);
         var providerError = reader.IsDBNull(22) ? null : reader.GetString(22);
         var reconcileQueued = reader.GetInt64(23) != 0;
-        var retrySafe = reader.GetInt64(24) != 0 && summary.RemoteId is null;
+        var retrySafe = reader.GetInt64(24) != 0 && summary.RemoteId is null && reader.IsDBNull(26);
         FailureCategory? normalizedError = reader.IsDBNull(25) ? null : Enum.Parse<FailureCategory>(reader.GetString(25));
         return new(summary, text, visibility, optionsSchema, submitted, confirmed, providerError,
             normalizedError, reconcileQueued, PublicationStateMachine.CanCancel(summary.PublicationState),
             PublicationStateMachine.CanRetry(summary.PublicationState) && retrySafe,
-            PublicationStateMachine.CanReconcile(summary.PublicationState));
+            PublicationStateMachine.CanReconcile(summary.PublicationState),
+            reader.IsDBNull(26) ? null : reader.GetString(26));
     }
 
     public async Task<bool> RequestRetryAsync(Guid publicationId, DateTimeOffset now, CancellationToken cancellationToken = default)
@@ -477,8 +478,10 @@ ORDER BY j.due_at,j.priority DESC,j.id LIMIT $scan
             cancellationToken, ("$id", Id(item.Publication.Id)));
         if (result.RemoteObjectId is not null)
             await SqliteDatabase.ExecuteAsync(connection, transaction,
-                "INSERT OR IGNORE INTO remote_objects(id,publication_id,account_id,kind,provider_object_id,observed_at) VALUES($id,$publication,$account,'final',$remote,$at)", cancellationToken,
-                ("$id", Id(Guid.NewGuid())), ("$publication", Id(item.Publication.Id)), ("$account", Id(item.Publication.AccountId)), ("$remote", result.RemoteObjectId), ("$at", At(now)));
+                "INSERT OR IGNORE INTO remote_objects(id,publication_id,account_id,kind,provider_object_id,observed_at) VALUES($id,$publication,$account,$kind,$remote,$at)", cancellationToken,
+                ("$id", Id(Guid.NewGuid())), ("$publication", Id(item.Publication.Id)), ("$account", Id(item.Publication.AccountId)),
+                ("$kind", item.Publication.ProviderKey == "instagram" && attempt.StepKey == "instagram.reel.create.v1" ? "container" : "final"),
+                ("$remote", result.RemoteObjectId), ("$at", At(now)));
 
         if (result.Checkpoint is not null)
         {
@@ -964,7 +967,8 @@ SELECT p.post_id,p.id,p.provider_key,p.account_id,a.alias,
       AND attempt.started_at=(SELECT MAX(last_attempt.started_at) FROM attempts last_attempt JOIN jobs last_job ON last_job.id=last_attempt.job_id WHERE last_job.publication_id=p.id AND last_job.kind='Publish'))
    AND NOT EXISTS(SELECT 1 FROM attempts ambiguous JOIN jobs ambiguous_job ON ambiguous_job.id=ambiguous.job_id
      WHERE ambiguous_job.publication_id=p.id AND ambiguous_job.kind='Publish' AND ambiguous.effect_certainty='Ambiguous')),
-  COALESCE(p.failure_category,(SELECT category_attempt.failure_category FROM attempts category_attempt JOIN jobs category_job ON category_job.id=category_attempt.job_id WHERE category_job.publication_id=p.id ORDER BY category_attempt.started_at DESC LIMIT 1))
+  COALESCE(p.failure_category,(SELECT category_attempt.failure_category FROM attempts category_attempt JOIN jobs category_job ON category_job.id=category_attempt.job_id WHERE category_job.publication_id=p.id ORDER BY category_attempt.started_at DESC LIMIT 1)),
+  (SELECT provider_object_id FROM remote_objects container WHERE container.publication_id=p.id AND container.kind='container' ORDER BY container.observed_at DESC LIMIT 1)
 FROM publications p
 JOIN posts post ON post.id=p.post_id
 JOIN contents content ON content.id=post.content_id

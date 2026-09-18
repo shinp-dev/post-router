@@ -96,6 +96,29 @@ public sealed class OperationsService(
         return await posts.EnqueueAsync(intent, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<EnqueueResult> EnqueueInstagramReelAsync(CreateInstagramReelRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.Video.DetectedMime != "video/mp4" || request.Video.SizeBytes is <= 0 or > 1024L * 1024 * 1024)
+            throw new ArgumentException("Instagram Reel requires an MP4 no larger than 1 GiB.");
+        var accounts = await posts.AccountsAsync(cancellationToken).ConfigureAwait(false);
+        var account = accounts.SingleOrDefault(candidate => candidate.Id == request.AccountId && candidate.ProviderKey == "instagram")
+            ?? throw new KeyNotFoundException("Instagram account not found.");
+        var capability = providers.GetRequired("instagram").Capabilities;
+        if (!capability.ContentKinds.Contains(ContentKind.Video) || capability.OptionsSchema != "instagram-reel-options/v1")
+            throw new NotSupportedException("Instagram Reel publishing is unavailable.");
+        var now = timeProvider.GetUtcNow();
+        var publishAt = request.PublishAt?.ToUniversalTime();
+        var target = new TargetIntent(account.Id, "instagram", "reel", capability.OptionsSchema,
+            capability.OptionsVersion, JsonSerializer.Serialize(new { shareToFeed = request.ShareToFeed }), account.Alias);
+        var intent = new CanonicalPostIntent(
+            string.IsNullOrWhiteSpace(request.ClientRequestId) ? $"gui-{Guid.NewGuid():N}" : request.ClientRequestId,
+            new Content(Guid.NewGuid(), ContentKind.Video, request.Caption, null, [request.Video]), [target],
+            new ScheduleIntent(publishAt is null ? ScheduleMode.Immediate : ScheduleMode.AtTime,
+                publishAt ?? now, TimeSpan.FromMinutes(15)));
+        return await posts.EnqueueAsync(intent, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<EnqueueResult> EnqueueAsync(Guid accountId, string text, IReadOnlyList<MediaAsset> media,
         ContentKind kind, DateTimeOffset? publishAt, string? clientRequestId, ApprovalPolicy approvalPolicy, CancellationToken cancellationToken)
     {

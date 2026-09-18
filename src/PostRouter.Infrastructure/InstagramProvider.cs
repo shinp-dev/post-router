@@ -232,17 +232,3 @@ internal sealed class InstagramAuthProvider(InstagramApiClient client, TimeProvi
     public Task RevokeAsync(AuthGrantRecord grant, TokenMaterial current, CancellationToken cancellationToken) =>
         throw new NotSupportedException("instagram_remote_revoke_unavailable");
 }
-
-internal sealed class InstagramConnectionOnlyAdapter : IProviderAdapter
-{
-    public string ProviderKey => "instagram";
-    public ProviderCapabilities Capabilities { get; } = new("instagram", Array.Empty<ContentKind>(), [], "instagram-connection-only", 1, "{}", true, false);
-    public bool RequiresConnectedAccount => true;
-    public void Validate(Content content, TargetIntent target) => throw new NotSupportedException("instagram_publishing_unavailable");
-    public Task<ProviderStep> PlanNextStepAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("instagram_publishing_unavailable");
-    public Task<StepResult> ExecuteStepAsync(ProviderStep providerStep, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("instagram_publishing_unavailable");
-    public Task<StepResult> ReconcileAsync(ProviderPublication input, string? checkpoint, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("instagram_publishing_unavailable");
-}
